@@ -1,0 +1,3 @@
+[submodule "reliquary"]
+	path = reliquary
+	url = https://github.com/reliquadotai/reliquary.git

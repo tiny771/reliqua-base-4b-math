@@ -1,0 +1,175 @@
+# Python virtual environment
+venv/
+env/
+.venv/
+.venv-vllm/
+.venv-vlllm/
+ENV/
+env.bak/
+venv.bak/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# LLM Dataset files
+*.parquet
+*.arrow
+*.jsonl
+*.jsonl.zst
+datasets/
+data/raw/
+data/processed/
+data/interim/
+data/external/
+*.h5
+*.hdf5
+*.rec
+*.mmap
+
+# Rollout data
+rollouts/
+rollout_storage/
+episodes/
+trajectories/
+*.rollout
+*.episode
+*.traj
+*.pkl
+*.pickle
+rollout_cache/
+rollout_checkpoints/
+
+# Cache directories
+cache/
+.cache/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.huggingface/
+.hf_cache/
+torch_cache/
+jax_cache/
+tensorflow_cache/
+model_cache/
+model_checkpoints/
+*.cache
+*.cached
+
+# Model files (large)
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.joblib
+*.onnx
+*.tflite
+*.pb
+
+# Training artifacts
+checkpoints/
+training_logs/
+logs/
+wandb/
+.tensorboard/
+runs/
+lightning_logs/
+mlruns/
+*.log
+*.out
+*.err
+
+# Vector databases
+chroma_db/
+pinecone_backup/
+faiss_index/
+*.faiss
+lance_db/
+qdrant_storage/
+*.vectordb
+
+# LLM specific
+*.lora
+*.adapter
+finetuned_models/
+peft_models/
+quantized_models/
+*.gguf
+*.ggml
+
+# Experiment tracking
+experiments/
+exp_*/
+results/
+outputs/
+*.metrics
+*.eval
+
+# Environment configs
+.env
+.env.local
+.env.*.local
+*.yaml.local
+*.yml.local
+config.local.py
+secrets.yaml
+secrets.json
+*.key
+*.pem
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter notebooks (uncomment if you want to ignore outputs)
+# .ipynb_checkpoints
+# *.ipynb
+
+# Distributed training
+*.distributed_lock
+*.lock
+*.pid
+
+# Profiling data
+*.prof
+*.bench
+*.timeline
+
+# Dataset processing locks
+*.processing_lock
+*.partial
+temp_*.jsonl
+
+# Rollout buffers (large files)
+*.rollout_buffer
+*.replay_buffer
+*.buffer
+
+# Cache for tokenized datasets
+tokenized_cache/
+tokenizer_cache/
+*.tokenized
+
+# Ray / RLlib
+ray_results/
+ray_cache/
+*.ray
+
+# vLLM / TGI specific
+vllm_cache/
+tgi_cache/
+model_cache.lock
+
+# Gradio / Streamlit
+gradio_cached_examples/
+streamlit_cache/
+
+# Hugging Face specific
+.huggingface_token
+hf_token.txt
