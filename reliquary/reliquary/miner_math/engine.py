@@ -1383,17 +1383,6 @@ class MiningEngine:
         current_round = _current_drand_round_at_send()
         nonce = os.urandom(16).hex()
 
-        _envelope_sig = sign_envelope(
-            wallet=self.wallet,
-            miner_hotkey=self.wallet.hotkey.ss58_address,
-            window_start=state.window_n,
-            prompt_idx=prompt_idx,
-            merkle_root=merkle_root,
-            checkpoint_hash=getattr(state, "checkpoint_revision", ""),
-            drand_round=current_round,
-            randomness=state.randomness or "",
-            nonce=nonce,
-        ).hex()
 
         request = BatchSubmissionRequest(
             miner_hotkey=self.wallet.hotkey.ss58_address,
@@ -1404,7 +1393,6 @@ class MiningEngine:
             checkpoint_hash=getattr(state, "checkpoint_revision", ""),
             drand_round=current_round,
             nonce=nonce,
-            envelope_signature=_envelope_sig,
             protocol_version=FORCED_SEED_PROTOCOL_VERSION,
             generation_profile_id=(
                 ACTIVE_PROTOCOL_PROFILE.profile_id
