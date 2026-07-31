@@ -28,6 +28,11 @@ import traceback
 
 import numpy as np
 
+from reliquary.protocol.profiles import (
+    ACTIVE_PROTOCOL_PROFILE,
+    to_generation_contract,
+)
+
 from reliquary.constants import (
     FORCED_SEED_PROTOCOL_VERSION,
     LAYER_INDEX,
@@ -463,8 +468,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (4.3, 5.3)
-        self._n_candidates = 128
+        self._difficulty_range = (1, 10)
+        self._n_candidates = 8
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -1044,65 +1049,65 @@ class MiningEngine:
             )
             return False
 
-        suspicious, dist_metrics = self._check_distribution_suspicious(result)
-        if suspicious and EARLY_STOP_GENERATION:
-            logger.warning(
-                f"⚠️ #{prompt_idx} → stage-one suspicious rollout rejected "
-                f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                f"| metrics={dist_metrics}"
-            )
-            return False
+        # suspicious, dist_metrics = self._check_distribution_suspicious(result)
+        # if suspicious and EARLY_STOP_GENERATION:
+        #     logger.warning(
+        #         f"⚠️ #{prompt_idx} → stage-one suspicious rollout rejected "
+        #         f"| rollout={getattr(result, 'rollout_idx', 0)} "
+        #         f"| metrics={dist_metrics}"
+        #     )
+        #     return False
 
-        completion_tokens = getattr(result, "tokens", None) or []
-        prompt_token_ids = getattr(result, "prompt_token_ids", None)
-        if prompt_token_ids is not None:
-            total_token_count = len(prompt_token_ids) + len(completion_tokens)
-        else:
-            total_token_count = (prompt_len or 0) + len(completion_tokens)
+        # completion_tokens = getattr(result, "tokens", None) or []
+        # prompt_token_ids = getattr(result, "prompt_token_ids", None)
+        # if prompt_token_ids is not None:
+        #     total_token_count = len(prompt_token_ids) + len(completion_tokens)
+        # else:
+        #     total_token_count = (prompt_len or 0) + len(completion_tokens)
 
-        if total_token_count <= FIRST_STAGE_MAX_TOKENS:
-            logger.warning(
-                f"⚠️ #{prompt_idx} → stage-one rollout rejected on token count "
-                f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                f"| tokens={total_token_count} "
-                f"| completion_tokens={len(completion_tokens)} "
-                f"| prompt_tokens={len(prompt_token_ids) if prompt_token_ids is not None else (prompt_len or 0)} "
-                f"| threshold={FIRST_STAGE_MAX_TOKENS}"
-            )
-            return False
+        # if total_token_count <= FIRST_STAGE_MAX_TOKENS:
+        #     logger.warning(
+        #         f"⚠️ #{prompt_idx} → stage-one rollout rejected on token count "
+        #         f"| rollout={getattr(result, 'rollout_idx', 0)} "
+        #         f"| tokens={total_token_count} "
+        #         f"| completion_tokens={len(completion_tokens)} "
+        #         f"| prompt_tokens={len(prompt_token_ids) if prompt_token_ids is not None else (prompt_len or 0)} "
+        #         f"| threshold={FIRST_STAGE_MAX_TOKENS}"
+        #     )
+        #     return False
 
-        token_logprobs = getattr(result, "token_logprobs", None) or [0.0]
+        # token_logprobs = getattr(result, "token_logprobs", None) or [0.0]
 
-        problem = {"ground_truth": ground_truth}
+        # problem = {"ground_truth": ground_truth}
 
-        reward = self.env.compute_reward(problem, result.text)
+        # reward = self.env.compute_reward(problem, result.text)
 
-        reward = getattr(result, "reward", 0.0)
+        # reward = getattr(result, "reward", 0.0)
 
-        lp = np.array(token_logprobs, dtype=np.float32)
-        avg_prob = float(np.exp(lp.mean()))
+        # lp = np.array(token_logprobs, dtype=np.float32)
+        # avg_prob = float(np.exp(lp.mean()))
 
-        confidence_gap = avg_prob - reward
+        # confidence_gap = avg_prob - reward
 
-        if reward == 0:
-            if confidence_gap < 0.5:
-                logger.warning(
-                    f"⚠️ #{prompt_idx} → stage-one rollout rejected on confidence_gap "
-                    f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                    f"| reward={reward} confidence gap={confidence_gap:.3f} "
-                    f"| threshold={0.5}"
-                )
-                return False
+        # if reward == 0:
+        #     if confidence_gap < 0.5:
+        #         logger.warning(
+        #             f"⚠️ #{prompt_idx} → stage-one rollout rejected on confidence_gap "
+        #             f"| rollout={getattr(result, 'rollout_idx', 0)} "
+        #             f"| reward={reward} confidence gap={confidence_gap:.3f} "
+        #             f"| threshold={0.5}"
+        #         )
+        #         return False
 
-        if reward == 1:
-            if confidence_gap > -0.2:
-                logger.warning(
-                    f"⚠️ #{prompt_idx} → stage-one rollout rejected on confidence_gap "
-                    f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                    f"| reward={reward} confidence gap={confidence_gap:.3f} "
-                    f"| threshold={-0.2}"
-                )
-                return False
+        # if reward == 1:
+        #     if confidence_gap > -0.2:
+        #         logger.warning(
+        #             f"⚠️ #{prompt_idx} → stage-one rollout rejected on confidence_gap "
+        #             f"| rollout={getattr(result, 'rollout_idx', 0)} "
+        #             f"| reward={reward} confidence gap={confidence_gap:.3f} "
+        #             f"| threshold={-0.2}"
+        #         )
+        #         return False
 
         print(f"Finally this rollout {prompt_idx} passed in first stage")
         return True
@@ -1127,14 +1132,14 @@ class MiningEngine:
             )
             return False
 
-        suspicious, dist_metrics = self._check_distribution_suspicious(result)
-        if suspicious and EARLY_STOP_GENERATION:
-            logger.warning(
-                f"⚠️ #{prompt_idx} → stage-two suspicious rollout rejected "
-                f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                f"| metrics={dist_metrics}"
-            )
-            return False
+        # suspicious, dist_metrics = self._check_distribution_suspicious(result)
+        # if suspicious and EARLY_STOP_GENERATION:
+        #     logger.warning(
+        #         f"⚠️ #{prompt_idx} → stage-two suspicious rollout rejected "
+        #         f"| rollout={getattr(result, 'rollout_idx', 0)} "
+        #         f"| metrics={dist_metrics}"
+        #     )
+        #     return False
 
         return True
 
@@ -1401,6 +1406,11 @@ class MiningEngine:
             nonce=nonce,
             envelope_signature=_envelope_sig,
             protocol_version=FORCED_SEED_PROTOCOL_VERSION,
+            generation_profile_id=(
+                ACTIVE_PROTOCOL_PROFILE.profile_id
+                if ACTIVE_PROTOCOL_PROFILE.protocol_version >= 3
+                else ""
+            ),
         )
 
         try:

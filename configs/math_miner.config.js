@@ -33,7 +33,7 @@ module.exports = {
       interpreter: '/root/reliquary-miner/.venv/bin/python',
 
       // Pass the original arguments
-      args: 'mine-math --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v3 --max-concurrent 128',
+      args: 'mine-math --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 128',
 
       // Working directory (adjust if needed)
       cwd: '/root/reliquary-miner',

@@ -62,7 +62,7 @@ class VLLMGenerator:
     def __init__(
         self,
         base_url: str = "http://0.0.0.0:8000",
-        model_name: str = "Qwen3.5-2B",
+        model_name: str = "Qwen3.5-4B",
         timeout: int = 300,
     ):
         self.base_url = base_url
@@ -120,7 +120,7 @@ class VLLMGenerator:
         self,
         prompt: str,
         temperature: float = 0.6,
-        max_tokens: int = 2048,
+        max_tokens: int = 16384,
         top_k: int = 20,
         top_p: float = 0.95,
         logprobs: int = 1,
@@ -331,7 +331,7 @@ class VLLMGenerator:
         self,
         prompt: str,
         temperature: float = 0.6,
-        max_tokens: int = 2048,
+        max_tokens: int = 16384,
         top_k: int = 20,
         top_p: float = 0.95,
         logprobs: int = 1,
@@ -472,6 +472,7 @@ def _eval_difficulty(problem):
 
     rounded = round(score, 1)
 
-    state = solution_state
+    # state = solution_state
+    state = False
 
     return state, rounded
