@@ -663,17 +663,6 @@ class MiningEngine:
         if not token_logprobs:
             return True, True
 
-        from reliquary.validator.boxed_integrity import has_malformed_final_answer
-
-        _bad, _bad_reason = has_malformed_final_answer(
-            reward=0.0,
-            text=rollout.text,
-            completion_length=len(tokens),
-            cap=MAX_NEW_TOKENS_PROTOCOL_CAP,
-        )
-        if _bad:
-            return True, True
-
         return False, False
 
     async def _generate_single_rollout(
