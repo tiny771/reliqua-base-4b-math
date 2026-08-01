@@ -23,8 +23,8 @@ from reliquary.constants import (
     ENVIRONMENT_MIX,
     FORENSIC_SAMPLE_PER_WINDOW,
     MAX_NEW_TOKENS_PROTOCOL_CAP_BY_ENV,
-    MAX_RANKED_PROOF_ATTEMPTS_PER_WINDOW,
     MAX_PROOF_WALL_SECONDS,
+    MAX_RANKED_PROOF_ATTEMPTS_PER_WINDOW,
     PROTOCOL_MODEL_ID,
     PROTOCOL_MODEL_REVISION,
     PROTOCOL_PROFILE_ID,
@@ -43,9 +43,7 @@ _grader_proc: "subprocess.Popen | None" = None
 
 def _configured_proof_device_identities(torch_module):
     raw = os.environ.get("RELIQUARY_PROOF_DEVICES", "")
-    requested = tuple(
-        device.strip() for device in raw.split(",") if device.strip()
-    )
+    requested = tuple(device.strip() for device in raw.split(",") if device.strip())
     if PROTOCOL_VERSION < 3:
         if requested:
             logger.warning(
@@ -59,9 +57,7 @@ def _configured_proof_device_identities(torch_module):
             "set RELIQUARY_PROOF_DEVICES after capacity qualification"
         )
 
-    from reliquary.validator.proof_capacity import (
-        resolve_cuda_proof_devices,
-    )
+    from reliquary.validator.proof_capacity import resolve_cuda_proof_devices
 
     return resolve_cuda_proof_devices(
         requested,
@@ -82,13 +78,12 @@ def _v3_activation_checkpoint_revision(
         )
     prefix = "sha:"
     revision = (
-        resume_from[len(prefix):].strip().lower()
+        resume_from[len(prefix) :].strip().lower()
         if resume_from.startswith(prefix)
         else ""
     )
-    if (
-        len(revision) != 40
-        or any(character not in "0123456789abcdef" for character in revision)
+    if len(revision) != 40 or any(
+        character not in "0123456789abcdef" for character in revision
     ):
         raise RuntimeError(
             f"{PROTOCOL_PROFILE_ID} requires "
@@ -156,14 +151,18 @@ def _ensure_grader_running(use_runsc: "bool | None" = None) -> None:
                 "Install runsc and build the grader bundle, or set "
                 "RELIQUARY_ALLOW_UNSANDBOXED_GRADER=1 only on isolated throwaway labs."
             )
-        _logger.warning("Launching UNSANDBOXED grader because RELIQUARY_ALLOW_UNSANDBOXED_GRADER=1 is set.")
+        _logger.warning(
+            "Launching UNSANDBOXED grader because RELIQUARY_ALLOW_UNSANDBOXED_GRADER=1 is set."
+        )
 
     cmd = [sys.executable, "-m", "reliquary.environment.grader.server"]
     if use_runsc:
         cmd.append("--use-runsc")
 
     sanitized_env = {
-        "PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+        "PATH": os.environ.get(
+            "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
         "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
         "PYTHONUNBUFFERED": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -175,7 +174,9 @@ def _ensure_grader_running(use_runsc: "bool | None" = None) -> None:
         ),
     }
 
-    _logger.info("Launching grader server (use_runsc=%s, scrubbed_env=1) ...", use_runsc)
+    _logger.info(
+        "Launching grader server (use_runsc=%s, scrubbed_env=1) ...", use_runsc
+    )
     _grader_proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -194,6 +195,7 @@ def _ensure_grader_running(use_runsc: "bool | None" = None) -> None:
                     _grader_proc.kill()
                 except Exception:
                     pass
+
     atexit.register(_cleanup)
 
     deadline = _time.time() + 15.0
@@ -207,7 +209,8 @@ def _ensure_grader_running(use_runsc: "bool | None" = None) -> None:
         "Grader server failed to bind %s within 15s. OCI rewards will "
         "be 0 and all OCI submissions will be rejected. Diagnose by "
         "running `python -m reliquary.environment.grader.server%s` manually.",
-        GRADER_SOCKET_PATH, " --use-runsc" if use_runsc else "",
+        GRADER_SOCKET_PATH,
+        " --use-runsc" if use_runsc else "",
     )
 
 
@@ -257,7 +260,9 @@ def mine(
     env_names = [n.strip() for n in environments.split(",") if n.strip()]
     logger.info(
         "Starting Reliquary miner (network=%s, netuid=%d, envs=%s)",
-        network, netuid, env_names,
+        network,
+        netuid,
+        env_names,
     )
 
     # Miners never grade (opencode reward is validator-authoritative), so this
@@ -265,16 +270,22 @@ def mine(
     if _miner_requires_grader(env_names):
         _ensure_grader_running()
     elif "opencodeinstruct" in env_names:
-        logger.info("OpenCode miner: reward is validator-authoritative; skipping local grader launch.")
+        logger.info(
+            "OpenCode miner: reward is validator-authoritative; skipping local grader launch."
+        )
 
     async def _run():
         import bittensor as bt
         import torch
+
         from reliquary.constants import ATTN_IMPLEMENTATION
         from reliquary.environment import load_environments
-        from reliquary.infrastructure.chain import get_subtensor, get_metagraph, NETUID
+        from reliquary.infrastructure.chain import NETUID, get_metagraph, get_subtensor
         from reliquary.miner.engine import MiningEngine
-        from reliquary.miner.submitter import discover_validator_url, get_window_state_v2
+        from reliquary.miner.submitter import (
+            discover_validator_url,
+            get_window_state_v2,
+        )
         from reliquary.shared.modeling import (
             MODEL_SNAPSHOT_ALLOW_PATTERNS,
             load_text_generation_model,
@@ -298,13 +309,16 @@ def mine(
 
             import httpx
             from huggingface_hub import snapshot_download
+
             async with httpx.AsyncClient(timeout=30) as client:
                 state = await get_window_state_v2(url, client=client)
             if state.checkpoint_repo_id and state.checkpoint_revision:
                 logger.info(
                     "Validator at %s is on checkpoint %d (%s@%s). "
                     "Downloading to seed the miner model.",
-                    url, state.checkpoint_n, state.checkpoint_repo_id,
+                    url,
+                    state.checkpoint_n,
+                    state.checkpoint_repo_id,
                     state.checkpoint_revision[:12],
                 )
                 initial_path = snapshot_download(
@@ -322,7 +336,8 @@ def mine(
             logger.warning(
                 "Could not fetch validator checkpoint (%s); falling back to "
                 "--checkpoint=%s",
-                e, checkpoint,
+                e,
+                checkpoint,
             )
 
         # --- Load models from resolved path ---
@@ -338,19 +353,27 @@ def mine(
         # sharing GPU 0 for test boxes that only expose one device.
         proof_device = "cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0"
 
-        vllm_model = load_text_generation_model(
-            initial_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation=ATTN_IMPLEMENTATION,
-            **base_load_kwargs,
-        ).to("cuda:0").eval()
+        vllm_model = (
+            load_text_generation_model(
+                initial_path,
+                torch_dtype=torch.bfloat16,
+                attn_implementation=ATTN_IMPLEMENTATION,
+                **base_load_kwargs,
+            )
+            .to("cuda:0")
+            .eval()
+        )
 
-        hf_model = load_text_generation_model(
-            initial_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation=ATTN_IMPLEMENTATION,
-            **base_load_kwargs,
-        ).to(proof_device).eval()
+        hf_model = (
+            load_text_generation_model(
+                initial_path,
+                torch_dtype=torch.bfloat16,
+                attn_implementation=ATTN_IMPLEMENTATION,
+                **base_load_kwargs,
+            )
+            .to(proof_device)
+            .eval()
+        )
 
         envs = load_environments(env_names)
         mix = [(n, w) for n, w in ENVIRONMENT_MIX if n in envs]
@@ -402,13 +425,20 @@ def validate(
         os.getenv("BT_WALLET_PATH", ""),
         help="Optional wallet base path",
     ),
-    checkpoint: str = typer.Option(DEFAULT_BASE_MODEL, help="HF repo id or local path of the model to load (trainer mode only)"),
+    checkpoint: str = typer.Option(
+        DEFAULT_BASE_MODEL,
+        help="HF repo id or local path of the model to load (trainer mode only)",
+    ),
     environments: str = typer.Option(
         os.getenv("RELIQUARY_ENVIRONMENTS", _DEFAULT_ENVS),
         help="Comma-separated environment names (trainer mode only; env: RELIQUARY_ENVIRONMENTS)",
     ),
-    http_host: str = typer.Option("0.0.0.0", help="HTTP bind address (trainer mode only)"),
-    http_port: int = typer.Option(VALIDATOR_HTTP_PORT, help="HTTP listen port (trainer mode only)"),
+    http_host: str = typer.Option(
+        "0.0.0.0", help="HTTP bind address (trainer mode only)"
+    ),
+    http_port: int = typer.Option(
+        VALIDATOR_HTTP_PORT, help="HTTP listen port (trainer mode only)"
+    ),
     external_ip: str = typer.Option(
         "",
         help=(
@@ -449,12 +479,17 @@ def validate(
     if train:
         logger.info(
             "Starting Reliquary validator [trainer] (network=%s, netuid=%d, envs=%s, http=%s:%d)",
-            network, netuid, env_names, http_host, http_port,
+            network,
+            netuid,
+            env_names,
+            http_host,
+            http_port,
         )
     else:
         logger.info(
             "Starting Reliquary validator [weight-only] (network=%s, netuid=%d)",
-            network, netuid,
+            network,
+            netuid,
         )
 
     async def _run():
@@ -470,12 +505,16 @@ def validate(
 
         if train:
             import torch
+
             from reliquary.constants import ATTN_IMPLEMENTATION
-            from reliquary.shared.modeling import load_text_generation_model, load_tokenizer
+            from reliquary.shared.modeling import (
+                load_text_generation_model,
+                load_tokenizer,
+            )
             from reliquary.validator.service import ValidationService
 
-            activation_checkpoint_revision = (
-                _v3_activation_checkpoint_revision(checkpoint, resume_from)
+            activation_checkpoint_revision = _v3_activation_checkpoint_revision(
+                checkpoint, resume_from
             )
             logger.info("Loading model from %s...", checkpoint)
             base_load_kwargs = (
@@ -485,16 +524,18 @@ def validate(
             )
             tokenizer = load_tokenizer(checkpoint, **base_load_kwargs)
 
-            model = load_text_generation_model(
-                checkpoint,
-                torch_dtype=torch.bfloat16,
-                attn_implementation=ATTN_IMPLEMENTATION,
-                **base_load_kwargs,
-            ).to("cuda:0").eval()
-
-            proof_device_identities = _configured_proof_device_identities(
-                torch
+            model = (
+                load_text_generation_model(
+                    checkpoint,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation=ATTN_IMPLEMENTATION,
+                    **base_load_kwargs,
+                )
+                .to("cuda:0")
+                .eval()
             )
+
+            proof_device_identities = _configured_proof_device_identities(torch)
             proof_devices = tuple(
                 identity.device_id for identity in proof_device_identities
             )
@@ -503,9 +544,7 @@ def validate(
                 from reliquary.shared.runtime_fingerprint import (
                     collect_runtime_fingerprint,
                 )
-                from reliquary.validator.observability import (
-                    immutable_build_revision,
-                )
+                from reliquary.validator.observability import immutable_build_revision
                 from reliquary.validator.proof_capacity import (
                     load_proof_capacity_qualification,
                 )
@@ -525,12 +564,10 @@ def validate(
                     expected_sha256=manifest_sha256,
                 )
                 hardware = tuple(
-                    identity.hardware_class
-                    for identity in proof_device_identities
+                    identity.hardware_class for identity in proof_device_identities
                 )
                 device_uuids = tuple(
-                    identity.device_uuid
-                    for identity in proof_device_identities
+                    identity.device_uuid for identity in proof_device_identities
                 )
                 runtime_fingerprint_hash = collect_runtime_fingerprint(
                     generation_model=model,
@@ -540,9 +577,7 @@ def validate(
                     profile_id=PROTOCOL_PROFILE_ID,
                     model_revision=PROTOCOL_MODEL_REVISION,
                     software_revision=immutable_build_revision(),
-                    checkpoint_revision=(
-                        activation_checkpoint_revision or ""
-                    ),
+                    checkpoint_revision=(activation_checkpoint_revision or ""),
                     runtime_fingerprint_hash=runtime_fingerprint_hash,
                     configured_devices=proof_devices,
                     configured_hardware=hardware,
@@ -572,12 +607,16 @@ def validate(
                     device,
                     checkpoint,
                 )
-                proof_models[device] = load_text_generation_model(
-                    checkpoint,
-                    torch_dtype=torch.bfloat16,
-                    attn_implementation=ATTN_IMPLEMENTATION,
-                    **base_load_kwargs,
-                ).to(device).eval()
+                proof_models[device] = (
+                    load_text_generation_model(
+                        checkpoint,
+                        torch_dtype=torch.bfloat16,
+                        attn_implementation=ATTN_IMPLEMENTATION,
+                        **base_load_kwargs,
+                    )
+                    .to(device)
+                    .eval()
+                )
 
             mix = [(n, w) for n, w in ENVIRONMENT_MIX if n in env_names]
             service = ValidationService(
@@ -595,9 +634,7 @@ def validate(
                 env_mix=mix if mix else None,
                 proof_devices=proof_devices or None,
                 proof_models=proof_models or None,
-                proof_capacity_qualification=(
-                    proof_capacity_qualification
-                ),
+                proof_capacity_qualification=(proof_capacity_qualification),
             )
             # Run the weight setter in a dedicated OS thread with its own
             # event loop. asyncio is single-threaded, so any sync blocking
@@ -630,13 +667,19 @@ def validate(
 
 
 @app.command()
-def mine_math(
-    checkpoint: str = typer.Option(..., help="Initial model checkpoint path or HF repo"),
+def mine_code(
+    checkpoint: str = typer.Option(
+        ..., help="Initial model checkpoint path or HF repo"
+    ),
     validator_url: str = typer.Option("", help="Validator URL override"),
-    environments: str = typer.Option(os.getenv("RELIQUARY_ENVIRONMENTS", _DEFAULT_ENVS)),
+    environments: str = typer.Option(
+        os.getenv("RELIQUARY_ENVIRONMENTS", _DEFAULT_ENVS)
+    ),
     log_level: str = typer.Option("INFO"),
     max_concurrent: int = typer.Option(16, help="Max concurrent prompt generations"),
-    vllm_base_url: str = typer.Option("http://0.0.0.0:8000", help="vLLM server address"),
+    vllm_base_url: str = typer.Option(
+        "http://0.0.0.0:8000", help="vLLM server address"
+    ),
 ):
     """Run high-performance MiningEngine math (refactored)."""
     setup_logging(log_level)
@@ -644,9 +687,10 @@ def mine_math(
 
     import bittensor as bt
     import torch
+
     from reliquary.environment import load_environments
     from reliquary.infrastructure.chain import get_subtensor
-    from reliquary.miner_math.engine import MiningEngine   # ← your refactored engine
+    from reliquary.miner_math.engine import MiningEngine  # ← your refactored engine
     from reliquary.shared.modeling import load_text_generation_model, load_tokenizer
 
     wallet = bt.Wallet(name="dashi", hotkey="miner-1")
@@ -657,16 +701,20 @@ def mine_math(
 
     # Load models
     tokenizer = load_tokenizer(checkpoint)
-    hf_model = load_text_generation_model(
-        checkpoint, torch_dtype=torch.bfloat16, attn_implementation="eager"
-    ).to("cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0").eval()
+    hf_model = (
+        load_text_generation_model(
+            checkpoint, torch_dtype=torch.bfloat16, attn_implementation="sdpa"
+        )
+        .to("cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0")
+        .eval()
+    )
 
     engine = MiningEngine(
         vllm_url=vllm_base_url,
         hf_model=hf_model,
         tokenizer=tokenizer,
         wallet=wallet,
-        env=envs['openmathinstruct'] if envs else None,   # adjust if you have a mix
+        env=envs["opencodeinstruct"] if envs else None,  # adjust if you have a mix
         proof_gpu=1 if torch.cuda.device_count() >= 2 else 0,
         validator_url_override=validator_url or None,
     )
