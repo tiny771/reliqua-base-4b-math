@@ -33,7 +33,7 @@ module.exports = {
       interpreter: '/root/reliquary-miner/.venv/bin/python',
 
       // Pass the original arguments
-      args: 'mine-code --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 128 --environments opencodeinstruct',
+      args: 'mine-code --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 200 --environments opencodeinstruct --vllm-base-url http://38.102.125.144:9090',
 
       // Working directory (adjust if needed)
       cwd: '/root/reliquary-miner',
@@ -55,7 +55,7 @@ module.exports = {
         NODE_ENV: 'production',
         PYTHONUNBUFFERED: '1',      // ensures logs appear in real-time
         GRAIL_ATTN_IMPL: 'sdpa',
-        // Add any other needed env vars, e.g. CUDA_VISIBLE_DEVICES
+        RELIQUARY_PROTOCOL_PROFILE:'qwen35-4b-auction-v3',
       },
 
       kill_timeout: 5000,

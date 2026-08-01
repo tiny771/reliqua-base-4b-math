@@ -1,0 +1,19 @@
+[Unit]
+Description=Reliquary Checkpoint Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/reliquary-miner
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="RELIQUARY_STATE_ENDPOINT=http://localhost:8000/state"
+ExecStart=/usr/bin/python3 /root/reliquary-miner/checkpoint_manager.py --poll-interval 60
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -681,19 +681,19 @@ def mine_code(
         "http://0.0.0.0:8000", help="vLLM server address"
     ),
 ):
-    """Run high-performance MiningEngine math (refactored)."""
+    """Run high-performance MiningEngine code (refactored)."""
     setup_logging(log_level)
-    logger.info("🚀 Starting Reliquary Math Miner")
+    logger.info("🚀 Starting Reliquary Code Miner")
 
     import bittensor as bt
     import torch
 
     from reliquary.environment import load_environments
     from reliquary.infrastructure.chain import get_subtensor
-    from reliquary.miner_math.engine import MiningEngine  # ← your refactored engine
+    from reliquary.miner_code.engine import MiningEngine  # ← your refactored engine
     from reliquary.shared.modeling import load_text_generation_model, load_tokenizer
 
-    wallet = bt.Wallet(name="dashi", hotkey="miner-1")
+    wallet = bt.Wallet(name="dashi", hotkey="miner-3")
     subtensor = asyncio.run(get_subtensor())
 
     env_names = [n.strip() for n in environments.split(",") if n.strip()]
@@ -717,6 +717,7 @@ def mine_code(
         env=envs["opencodeinstruct"] if envs else None,  # adjust if you have a mix
         proof_gpu=1 if torch.cuda.device_count() >= 2 else 0,
         validator_url_override=validator_url or None,
+        max_concurrent=max_concurrent,
     )
 
     asyncio.run(engine.mine_window(subtensor))

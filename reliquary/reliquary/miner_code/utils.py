@@ -72,18 +72,18 @@ class VLLMGenerator:
         self._sync_client = httpx.Client(
             timeout=self.timeout,
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+            limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500),
         )
 
         self._async_client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=10.0,
-                read=300.0,
+                read=float(timeout),
                 write=30.0,
                 pool=30.0,
             ),
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+            limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500),
         )
 
         self.completions_url = f"{self.base_url}/v1/completions"
@@ -102,8 +102,12 @@ class VLLMGenerator:
             response.raise_for_status()
             return response.json()
 
+        except httpx.TimeoutException as e:
+            logger.error(f"vLLM API request timeout: {type(e).__name__}: {e}")
+            return None
+
         except httpx.RequestError as e:
-            logger.error(f"vLLM API request failed: {e}")
+            logger.error(f"vLLM API request failed: {type(e).__name__}: {e}")
             return None
 
         except httpx.HTTPStatusError as e:
@@ -113,7 +117,7 @@ class VLLMGenerator:
             return None
 
         except Exception as e:
-            logger.error(f"Failed to parse vLLM JSON response: {e}")
+            logger.error(f"Failed to parse vLLM JSON response: {type(e).__name__}: {e}")
             return None
 
     async def generate_rollout_async(
@@ -173,49 +177,59 @@ class VLLMGenerator:
 
         data = await self._post_request_async(payload)
         if not data or not data.get("choices"):
+            logger.error("JSON invalid error")
             return None
 
         result = self._parse_response_greedy(data, include_prompt_logprobs=True)
+        print("*"*40)
+        print(result)
+        print("*"*40)
         return result if result else None
 
-    async def _reload_weight_async(self, weight_path: str = "/mnt/d/models/Qwen3.5-2B"):
+    async def _reload_weight_async(self):
         """Reload model weights on the vLLM server asynchronously."""
         try:
             response = await self._async_client.post(
                 self.reload_url,
                 json={
                     "method": "reload_weights",
-                    "kwargs": {"weights_path": weight_path},
+                    "kwargs": {"weights_path": "/root/reliquary-miner/model"},
                 },
             )
             response.raise_for_status()
             logger.info("VLLM reload weight successfully")
             return response.json()
+        except httpx.TimeoutException as e:
+            logger.error(f"vLLM reload request timeout: {type(e).__name__}: {e}")
+            return None
         except httpx.RequestError as e:
-            logger.error(f"vLLM reload request failed: {e}")
+            logger.error(f"vLLM reload request failed: {type(e).__name__}: {e}")
             return None
         except Exception as e:
-            logger.error(f"Failed to process vLLM reload response: {e}")
+            logger.error(f"Failed to process vLLM reload response: {type(e).__name__}: {e}")
             return None
 
-    def _reload_weight(self, weight_path: str = "/mnt/d/models/Qwen3.5-2B"):
+    def _reload_weight(self):
         """Backward-compatible sync wrapper for reloading model weights."""
         try:
             response = self._sync_client.post(
                 self.reload_url,
                 json={
                     "method": "reload_weights",
-                    "kwargs": {"weights_path": weight_path},
+                    "kwargs": {"weights_path": f"/root/reliquary-miner/model"},
                 },
             )
             response.raise_for_status()
             logger.info("VLLM reload weight successfully")
             return response.json()
+        except httpx.TimeoutException as e:
+            logger.error(f"vLLM reload request timeout: {type(e).__name__}: {e}")
+            return None
         except httpx.RequestError as e:
-            logger.error(f"vLLM reload request failed: {e}")
+            logger.error(f"vLLM reload request failed: {type(e).__name__}: {e}")
             return None
         except Exception as e:
-            logger.error(f"Failed to process vLLM reload response: {e}")
+            logger.error(f"Failed to process vLLM reload response: {type(e).__name__}: {e}")
             return None
 
     def _post_request(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -227,8 +241,11 @@ class VLLMGenerator:
             )
             response.raise_for_status()
             return response.json()
+        except httpx.TimeoutException as e:
+            logger.error(f"vLLM API request timeout: {type(e).__name__}: {e}")
+            return None
         except httpx.RequestError as e:
-            logger.error(f"vLLM API request failed: {e}")
+            logger.error(f"vLLM API request failed: {type(e).__name__}: {e}")
             return None
         except httpx.HTTPStatusError as e:
             logger.error(
@@ -236,7 +253,7 @@ class VLLMGenerator:
             )
             return None
         except Exception as e:
-            logger.error(f"Failed to parse vLLM JSON response: {e}")
+            logger.error(f"Failed to parse vLLM JSON response: {type(e).__name__}: {e}")
             return None
 
     def _parse_response(
@@ -299,8 +316,7 @@ class VLLMGenerator:
                     write=30.0,
                     pool=30.0,
                 ),
-                follow_redirects=True,
-                limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+                limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500),
             )
 
     def close(self) -> None:

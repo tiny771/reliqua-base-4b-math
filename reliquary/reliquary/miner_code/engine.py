@@ -1,9 +1,14 @@
-"""Optimized Miner Engine with vLLM v1 forced-seed processor using pre-computed u_list.
+"""Miner Engine for Reliquary Subnet 81 (Forced-Seed Protocol v2).
 
-Based on miners/miner_processor/engine.py but integrates optimized ForcedSeedLogitsProcessor
-that uses pre-generated u values (O(1) lookups) instead of per-token u_at() computation.
+Implements auction-mode mining with deterministic rollout generation via vLLM's
+ForcedSeedLogitsProcessor. Uses SHA256-derived uniform draws computed per-token
+for bit-identical sampling that prevents variance farming and pre-generation.
 
-Performance Improvement: ~70% latency reduction in per-token generation (no SHA256 per token).
+Key features:
+- Concurrent 8-rollout generation with early-abort on failures
+- Two-stage quality gating for prompt frontier optimization
+- GRAIL sketch commitments for cryptographic authenticity proof
+- Precommit/reveal submission flow for auction fairness
 """
 
 from __future__ import annotations
@@ -51,17 +56,10 @@ from reliquary.validator.verifier import rewards_std
 if TYPE_CHECKING:
     from reliquary.environment.base import Environment
 
-from reliquary.miner_math.utils import GenerationResult, VLLMGenerator, _eval_difficulty
+from reliquary.miner_code.utils import GenerationResult, VLLMGenerator, _eval_difficulty
 
-# ================= CONTROL WORKFLOW =======================
-
-FORCED_EOS_INJECT = False
-EARLY_STOP_GENERATION = True
-ENABLE_BFT_GENERATION = True
-ENABLE_PREFLIGHT_GENERATION = False
-FIRST_STAGE_MAX_TOKENS = 2000
-
-# ==========================================================
+EARLY_STOP_GENERATION = True  # Abort rollouts on malformed/suspicious patterns
+TEST_MODE = False
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -78,7 +76,6 @@ class MinerStats:
         self.total_tokens = 0
         self.gen_times: deque = deque(maxlen=200)
         self.proof_times: deque = deque(maxlen=100)
-        self.u_list_gen_times: deque = deque(maxlen=200)  # Track u_list pre-generation
         self.start_time = time.time()
         self.last_selection_time: float | None = None
         self.last_batch_completion_time: float | None = None
@@ -88,9 +85,6 @@ class MinerStats:
         self.total_tokens += tokens
         self.rollouts_generated += 1
 
-    def record_u_list_generation(self, duration: float):
-        self.u_list_gen_times.append(duration)
-
     def record_selection(self) -> None:
         self.last_selection_time = time.time()
 
@@ -99,11 +93,6 @@ class MinerStats:
 
     def get_stats(self) -> Dict:
         elapsed = time.time() - self.start_time
-        avg_u_list_gen = (
-            round(statistics.mean(self.u_list_gen_times), 3)
-            if self.u_list_gen_times
-            else 0
-        )
         return {
             "uptime_min": round(elapsed / 60, 1),
             "prompts": self.prompts_processed,
@@ -116,7 +105,6 @@ class MinerStats:
             "accepted_rate": round(
                 self.submissions_accepted / max(self.prompts_processed, 1) * 100, 1
             ),
-            "avg_u_list_gen_ms": avg_u_list_gen * 1000,  # Convert to ms
         }
 
 
@@ -315,7 +303,6 @@ def _current_drand_round_at_send() -> int:
 def _build_vllm_extra_body(
     *,
     prompt_len: int,
-    # u_list_entry: List[float],
     prompt_idx: int,
     rollout_idx: int,
     randomness: str,
@@ -323,6 +310,12 @@ def _build_vllm_extra_body(
     base_offset: int = 0,
     start_len: int | None = None,
 ) -> Dict[str, object]:
+    """Build extra_body parameters for ForcedSeedLogitsProcessor.
+
+    These parameters are passed to vLLM's SamplingParams.extra_args and
+    extracted by ForcedSeedLogitsProcessor to compute deterministic u_at()
+    uniform draws per token position.
+    """
     return {
         "randomness": randomness,
         "prompt_idx": prompt_idx,
@@ -344,10 +337,10 @@ class MiningEngine:
         tokenizer,
         wallet,
         env=None,
-        proof_gpu=1,
+        proof_gpu=0,
         max_new_tokens=MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override=None,
-        max_concurrent=40,
+        max_concurrent=200,
         difficulty_range: tuple[float, float] | None = None,
     ):
         self.vllm_url = vllm_url
@@ -358,8 +351,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (1, 10)
-        self._n_candidates = 5
+        self._difficulty_range = (0, 20)
+        self._n_candidates = 25
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -385,7 +378,7 @@ class MiningEngine:
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._vllm_client = VLLMGenerator(base_url=vllm_url, model_name="reliquary")
         logger.info(
-            f"🚀 Optimized Miner ready (u_list pre-gen) | concurrency={max_concurrent} | results_dir={self._results_dir}"
+            f"🚀 Miner ready | concurrency={max_concurrent} | results_dir={self._results_dir}"
         )
 
     async def mine_window(self, subtensor):
@@ -407,10 +400,10 @@ class MiningEngine:
             metagraph = await chain.get_metagraph(subtensor, chain.NETUID)
             url = discover_validator_url(metagraph)
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=240) as client:
             while True:
                 state = await self._sync_state(client, url)
-                if not state or state.state != WindowState.OPEN or not state.randomness:
+                if not state or state.state != WindowState.OPEN or not state.randomness or TEST_MODE:
                     await self._vllm_client.cancel_all_requests()
                     await asyncio.sleep(0.5)
                     self._selected = {}
@@ -693,7 +686,6 @@ class MiningEngine:
         checkpoint_hash: str,
         ground_truth: str,
         max_tokens: int = 8192,
-        # u_list_entry: List[float],
     ) -> Optional["GenerationResult"]:
         try:
             extra_body = _build_vllm_extra_body(
@@ -843,7 +835,6 @@ class MiningEngine:
         #         )
         #         return False
 
-        print(f"Finally this rollout {prompt_idx} passed in first stage")
         return True
 
     def _passes_stage_two_gate(self, result, prompt_idx: int) -> bool:
@@ -1028,15 +1019,10 @@ class MiningEngine:
 
     def _build_rollout_submission(self, gen, problem, randomness, reward):
         prompt_ids = gen.prompt_token_ids
-        # print(f"Prompt Text: {self.tokenizer.decode(prompt_ids)}", flush=True)
         comp_ids = gen.tokens
-        # print(f"Completion Text: {self.tokenizer.decode(comp_ids)}", flush=True)
         forced = gen.forced
         forced_span = gen.forced_span
         all_tokens = prompt_ids + comp_ids
-        print("*" * 40, flush=True)
-        print(f"ALL Text: {self.tokenizer.decode(all_tokens)}", flush=True)
-        print("*" * 40, flush=True)
 
         commit = self._build_grail_commit(
             all_tokens, len(prompt_ids), randomness, forced, forced_span
@@ -1118,6 +1104,8 @@ class MiningEngine:
         merkle_root = _compute_merkle_root(submissions)
         current_round = _current_drand_round_at_send()
         nonce = os.urandom(16).hex()
+
+        print(f"🐞 {ACTIVE_PROTOCOL_PROFILE.profile_id}", flush=True)
 
         request = BatchSubmissionRequest(
             miner_hotkey=self.wallet.hotkey.ss58_address,
@@ -1215,7 +1203,7 @@ class MiningEngine:
                 del old
             await asyncio.to_thread(torch.cuda.empty_cache)
 
-            self._vllm_client._reload_weight(local_path)
+            self._vllm_client._reload_weight()
 
             self._loaded_checkpoint_path = local_path
             logger.info("✅ Checkpoint loaded successfully")
@@ -1231,10 +1219,9 @@ class MiningEngine:
         cycle_time = max(0.0, end_time - start_time)
         cycle_time = round(cycle_time, 1)
         logger.info(
-            f"📊 [OPTIMIZED MINER STATS] uptime={s['uptime_min']}m | prompts={s['prompts']} | "
+            f"📊 [MINER STATS] uptime={s['uptime_min']}m | prompts={s['prompts']} | "
             f"{s['tokens_per_sec']} tok/s | avg_gen={s['avg_gen_sec']}s | "
             f"cycle_time={cycle_time}s | ({self._n_candidates}candidates) | "
-            # f"u_list_gen={s['avg_u_list_gen_ms']:.2f}ms | accept={s['accepted_rate']}% | "
             f"accept={s['accepted_rate']}% | "
             f"rollouts={stats.rollouts_generated} | proof_avg={round(statistics.mean(stats.proof_times), 3) if stats.proof_times else 0:.3f}s"
         )
