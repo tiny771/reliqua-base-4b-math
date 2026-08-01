@@ -457,7 +457,7 @@ class MiningEngine:
         proof_gpu=1,
         max_new_tokens=MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override=None,
-        max_concurrent=36,
+        max_concurrent=40,
         difficulty_range: tuple[float, float] | None = None,
     ):
         self.vllm_url = vllm_url
@@ -469,7 +469,7 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (1, 10)
-        self._n_candidates = 8
+        self._n_candidates = 5
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -568,9 +568,9 @@ class MiningEngine:
                         if isinstance(result, Exception):
                             logger.error(f"Prompt task failed: {result}")
 
-                if stats.prompts_processed % 8 == 0:
-                    stats.record_batch_completion()
-                    self._log_stats()
+        
+                stats.record_batch_completion()
+                self._log_stats()
 
     async def _sync_state(self, client, url):
         from reliquary.miner.submitter import get_window_state_v2

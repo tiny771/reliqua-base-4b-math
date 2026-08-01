@@ -72,7 +72,7 @@ class VLLMGenerator:
         self._sync_client = httpx.Client(
             timeout=self.timeout,
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=512, max_keepalive_connections=256),
+            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
         )
 
         self._async_client = httpx.AsyncClient(
@@ -83,7 +83,7 @@ class VLLMGenerator:
                 pool=30.0,
             ),
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=512, max_keepalive_connections=256),
+            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
         )
 
         self.completions_url = f"{self.base_url}/v1/completions"
@@ -300,7 +300,7 @@ class VLLMGenerator:
                     pool=30.0,
                 ),
                 follow_redirects=True,
-                limits=httpx.Limits(max_connections=512, max_keepalive_connections=256),
+                limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
             )
 
     def close(self) -> None:
