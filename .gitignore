@@ -173,3 +173,5 @@ streamlit_cache/
 # Hugging Face specific
 .huggingface_token
 hf_token.txt
+
+classifications/
