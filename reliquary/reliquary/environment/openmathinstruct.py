@@ -418,10 +418,15 @@ def _load_dataset(repo: str, revision: str):
     if path.exists() and (path / "dataset_info.json").exists():
         import datasets as hf
         return hf.load_from_disk(str(path))
-    from reliquary.environment.virtual_parquet import VirtualParquetDataset
-    return VirtualParquetDataset(repo, revision, columns=["problem", "expected_answer"])
+    # from reliquary.environment.virtual_parquet import VirtualParquetDataset
+    # return VirtualParquetDataset(repo, revision, columns=["problem", "expected_answer"])
+    import datasets as hf
 
+    ds = hf.load_dataset(repo, revision=revision)
+    dataset = hf.concatenate_datasets([ds[split] for split in ds.keys()])
 
+    return dataset
+    
 class OpenMathInstructEnvironment:
     """Nvidia OpenMathInstruct-2: ~14M synthetic math problems.
 

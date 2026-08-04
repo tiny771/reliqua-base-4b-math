@@ -457,7 +457,7 @@ class MiningEngine:
         proof_gpu=1,
         max_new_tokens=MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override=None,
-        max_concurrent=40,
+        max_concurrent=384,
         difficulty_range: tuple[float, float] | None = None,
     ):
         self.vllm_url = vllm_url
@@ -468,8 +468,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (1, 10)
-        self._n_candidates = 5
+        self._difficulty_range = (1.5, 2.5)
+        self._n_candidates = 1
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -523,7 +523,7 @@ class MiningEngine:
                 if not state or state.state != WindowState.OPEN or not state.randomness:
                     await self._vllm_client.cancel_all_requests()
                     await asyncio.sleep(0.5)
-                    self._selected = {}
+                    self._selected = set()
                     continue
 
                 prompt_idxs, problems = select_prompts(
@@ -534,6 +534,16 @@ class MiningEngine:
                     count=self._n_candidates,
                     difficulty_range=self._difficulty_range,
                 )
+
+                self._selected.update(prompt_idxs)
+                
+                logger.info(
+                    f"Selected prompts "
+                    f"{self._selected}"
+                )
+
+
+
                 diffs = [
                     problem.get("difficulty", _eval_difficulty(problem)[0])
                     for problem in problems
@@ -702,7 +712,7 @@ class MiningEngine:
                 for g, rew in zip(gen_results, rewards)
             ]
             submit_result = await self._submit(
-                submissions, prompt_idx, randomness, window_n, state, client, url
+                submissions, prompt_idx, randomness, window_n, state, client, url, rewards,
             )
             await self._record_analysis_result(
                 {
@@ -880,6 +890,7 @@ class MiningEngine:
             result = await self._vllm_client.generate_rollout_async(
                 prompt,
                 max_tokens=BFT_THINKING_BUDGET,
+                # max_tokens=2500,
                 extra_body=extra_body,
             )
 
@@ -898,6 +909,7 @@ class MiningEngine:
             # 3. Check if BFT (Forced) generation is needed. The validator only
             # accepts a forced span when the first pass actually consumed the
             # full thinking budget and still lacked a natural close token.
+
             completion_tokens = list(getattr(result, "tokens", None) or [])
             reached_thinking_budget = len(completion_tokens) >= BFT_THINKING_BUDGET
             needs_bft = (
@@ -908,9 +920,10 @@ class MiningEngine:
 
             if needs_bft and ENABLE_BFT_GENERATION:
                 logger.info(
-                    "↩️ Rollout #%d for #%d triggering BFT generation (missing '</think>' and non-stop finish)",
+                    "↩️ Rollout #%d for #%d triggering BFT generation (missing '</think>' and non-stop finish) completion length: %d",
                     rollout_idx,
                     prompt_idx,
+                    len(completion_tokens),
                 )
 
                 # Prepare forced generation
@@ -1201,7 +1214,7 @@ class MiningEngine:
                         await _abort_batch()
                         duration = time.time() - start
                         logger.warning(
-                            f"⚠️ #{prompt_idx} → later rollout rejected at stage-two gate "
+                            f"⚠️ #{prompt_idx}f → later rollout rejected at stage-two gate "
                             f"| rollout={getattr(result, 'rollout_idx', 0)} "
                             f"| generated={len(results)}/{M_ROLLOUTS} "
                             f"| {duration:.2f}s"
@@ -1374,6 +1387,7 @@ class MiningEngine:
         state,
         client,
         url,
+        rewards,
     ):
         """Fully implemented submission logic."""
         if not submissions:
@@ -1415,7 +1429,8 @@ class MiningEngine:
             logger.info(
                 f"📤 Submitted window={state.window_n} prompt={prompt_idx} "
                 f"accepted={resp.accepted} reason={getattr(resp.reason, 'value', resp.reason)} "
-                f"merkle_root={merkle_root[:16]}"
+                f"merkle_root={merkle_root[:16]} "
+                f"rewards={rewards}"
             )
             await self._save_submission_result(
                 {
