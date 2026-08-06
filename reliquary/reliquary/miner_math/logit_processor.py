@@ -58,6 +58,8 @@ class ForcedSeedLogitsProcessor(LogitsProcessor):
         ) -> Optional[dict]:
             if not params.extra_args or "randomness" not in params.extra_args:
                 return None  # Disable processor for this request
+            # Debug: emit extra_args and current output token list when enabled
+            # print(f"[ForcedSeedLogitsProcessor] enabled extra_args={params.extra_args} output_tok_len={len(output_tok_ids) if output_tok_ids is not None else None}")
 
             return {
                 "randomness": params.extra_args["randomness"],
@@ -97,6 +99,11 @@ class ForcedSeedLogitsProcessor(LogitsProcessor):
             )
             u_values.append(u)
 
+            # if row_idx == rows[0]:
+            #     print(
+            #         f"[ForcedSeedLogitsProcessor] apply row={row_idx} s={s} base_offset={state['base_offset']} t={t} u={u}"
+            #     )
+
         rows_tensor = torch.tensor(rows, dtype=torch.long, device=logits.device)
 
         # 1. Extract logits for active rows and cast to float32 for stable numeric
@@ -112,6 +119,12 @@ class ForcedSeedLogitsProcessor(LogitsProcessor):
 
         picked_indices = torch.searchsorted(cdf, u_tensor, right=True)
         picked_indices = torch.clamp(picked_indices, max=probs.shape[-1] - 1).squeeze(-1)
+
+        # if rows_tensor.numel() > 0:
+        #     first_picked = int(picked_indices[0].item())
+        #     print(
+        #         f"[ForcedSeedLogitsProcessor] picked row={rows_tensor[0].item()} token_id={first_picked}"
+        #     )
 
         # 4. Construct forced logits tensor (out-of-place to avoid vLLM caching issues).
         # Preserve original logits dtype when writing forced values to avoid

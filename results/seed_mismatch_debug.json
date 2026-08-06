@@ -1,0 +1,29 @@
+[
+  {
+    "prompt_idx": 13775028,
+    "rollout_idx": 0,
+    "accepted": false,
+    "checkpoint_hash": "526fcc98f2a9217d538144f0e3eb1a8655e48daf",
+    "randomness": "7a78493b702b1c61509b27e61512cd00edede8e100f15c440e20fe99f408a380",
+    "completion_length": 5827,
+    "prompt_length": 61,
+    "n_positions": 5827,
+    "n_stochastic": 2167,
+    "n_exact_match": 1270,
+    "n_boundary_match": 4935,
+    "n_hard_mismatch": 892,
+    "n_deterministic_hard_mismatch": 1,
+    "n_miss_gt_0_01": 874,
+    "n_miss_gt_0_05": 755,
+    "n_miss_gt_0_10": 638,
+    "max_cdf_miss": 0.9457189440727234,
+    "first_hard_mismatch_offset": 2,
+    "exact_match_rate": 0.586063682510383,
+    "boundary_match_rate": 2.277341947392709,
+    "hard_mismatch_rate": 0.4116289801568989,
+    "forced_span": null,
+    "forced": false,
+    "token_count": 5888,
+    "completion_preview": "..."
+  }
+]

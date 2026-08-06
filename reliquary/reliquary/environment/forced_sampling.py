@@ -79,6 +79,7 @@ def u_at(randomness: str, prompt_idx: int, checkpoint_hash: str,
            + _lp(checkpoint_hash.encode())
            + int(rollout_index).to_bytes(4, "big")
            + int(t).to_bytes(4, "big"))
+    # print(msg, flush=True)
     return int.from_bytes(hashlib.sha256(msg).digest()[:8], "big") / 2.0**64
 
 
