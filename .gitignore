@@ -101,7 +101,7 @@ quantized_models/
 # Experiment tracking
 experiments/
 exp_*/
-results/
+
 outputs/
 *.metrics
 *.eval
