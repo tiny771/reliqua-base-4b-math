@@ -99,22 +99,27 @@ class ForcedSeedLogitsProcessor(LogitsProcessor):
 
         rows_tensor = torch.tensor(rows, dtype=torch.long, device=logits.device)
 
-        # 1. Extract logits for active rows
-        active_logits = logits[rows_tensor]
+        # 1. Extract logits for active rows and cast to float32 for stable numeric
+        # warp / softmax / cdf computation (matches validator's float casting).
+        active_logits = logits[rows_tensor].float()
 
-        # 2. Warp probabilities (vectorized)
+        # 2. Warp probabilities (vectorized) — operates in float32
         probs = _warp_batch(active_logits, t=self.temperature, top_k=self.top_k, top_p=self.top_p)
 
-        # 3. Vectorized inverse-CDF pick
+        # 3. Vectorized inverse-CDF pick (operate in float32 explicitly)
         cdf = torch.cumsum(probs, dim=-1)
-        u_tensor = torch.tensor(u_values, dtype=cdf.dtype, device=cdf.device).unsqueeze(-1)
+        u_tensor = torch.tensor(u_values, dtype=torch.float32, device=cdf.device).unsqueeze(-1)
 
         picked_indices = torch.searchsorted(cdf, u_tensor, right=True)
         picked_indices = torch.clamp(picked_indices, max=probs.shape[-1] - 1).squeeze(-1)
 
-        # 4. Construct forced logits tensor (out-of-place to avoid vLLM caching issues)
+        # 4. Construct forced logits tensor (out-of-place to avoid vLLM caching issues).
+        # Preserve original logits dtype when writing forced values to avoid
+        # unexpected promotion/rounding differences inside vLLM.
         out_logits = logits.clone()
-        out_logits[rows_tensor] = float("-inf")
-        out_logits[rows_tensor, picked_indices] = 0.0  # Force selection
+        neg_inf = torch.tensor(float("-inf"), dtype=logits.dtype, device=logits.device)
+        zero_val = torch.tensor(0.0, dtype=logits.dtype, device=logits.device)
+        out_logits[rows_tensor] = neg_inf
+        out_logits[rows_tensor, picked_indices] = zero_val  # Force selection
 
         return out_logits
