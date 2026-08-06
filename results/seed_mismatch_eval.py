@@ -13,8 +13,8 @@ Usage:
         --submission-log results/submission_results.jsonl \
         --checkpoint-model ReliquaryForge/qwen3.5-4b-reliquary-v4 \
         --limit 50 \
-        --device cuda:0 \
-        --output-json results/seed_mismatch_report.json
+        --device cuda:1 \
+        --output-json results/seed_mismatch_report_debug.json
         [--tokenizer-model <hf-model-or-local-path>] \
         [--device cuda:0] \
         [--limit 50] \
@@ -246,6 +246,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tokenizer-model", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--prompt-idx", type=int, default=None,
+                        help="Only evaluate rollouts for this prompt_idx")
+    parser.add_argument("--rollout-idx", type=int, default=None,
+                        help="Only evaluate this rollout index for the given prompt")
     parser.add_argument("--output-json", type=Path, default=None)
     return parser
 
@@ -260,6 +264,12 @@ def main() -> int:
         device=args.device,
     )
     results = evaluator.evaluate_submission_log(args.submission_log, limit=args.limit)
+
+    # Optionally filter to a specific prompt_idx / rollout_idx
+    if args.prompt_idx is not None:
+        results = [r for r in results if r.prompt_idx == args.prompt_idx]
+    if args.rollout_idx is not None:
+        results = [r for r in results if r.rollout_idx == args.rollout_idx]
 
     if args.output_json is not None:
         out_path = args.output_json
