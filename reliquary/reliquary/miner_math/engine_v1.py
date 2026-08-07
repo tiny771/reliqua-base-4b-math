@@ -464,8 +464,10 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (2.0, 3.0)
-        self._n_candidates = 12
+        self._difficulty_range = (3.5, 5.5)
+        self._n_candidates = 120
+
+        self._process_start = True
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -514,18 +516,17 @@ class MiningEngine:
 
 
         async with httpx.AsyncClient(timeout=30) as client:
-            process_start = True
             while True:
                 state = await self._sync_state(client, url)
                 if not state or state.state != WindowState.OPEN or not state.randomness:
                     await self._vllm_client.cancel_all_requests()
                     await asyncio.sleep(0.5)
                     self._selected = set()
-                    process_start = False
+                    self._process_start = True
                     continue
-                process_start = True
+    
 
-                if process_start:
+                if self._process_start:
                     prompt_idxs, problems = select_prompts(
                         self.env,
                         self._cooldown,
@@ -541,7 +542,6 @@ class MiningEngine:
                         f"Selected prompts "
                         f"{self._selected}"
                     )
-
 
                     diffs = [
                         problem.get("difficulty", _eval_difficulty(problem)[0])
@@ -591,7 +591,12 @@ class MiningEngine:
 
                     stats.record_batch_completion()
                     self._log_stats()
-                    process_start = False
+                    self._process_start = False
+                else:
+                    logger.info(
+                        f"🧭 Window {state.window_n} prompts selection is stopped."
+                    )
+                    time.sleep(3)
 
     async def _sync_state(self, client, url):
         from reliquary.miner.submitter import get_window_state_v2

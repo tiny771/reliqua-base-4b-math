@@ -469,7 +469,9 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (3.5, 4.5)
-        self._n_candidates = 8
+        self._n_candidates = 24
+
+        self._process_start = True
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -524,63 +526,73 @@ class MiningEngine:
                     await self._vllm_client.cancel_all_requests()
                     await asyncio.sleep(0.5)
                     self._selected = set()
+                    self._process_start = True
                     continue
 
-                prompt_idxs, problems = select_prompts(
-                    self.env,
-                    self._cooldown,
-                    self._selected,
-                    self._prompt_range,
-                    count=self._n_candidates,
-                    difficulty_range=self._difficulty_range,
-                )
+                if self._process_start:
 
-                self._selected.update(prompt_idxs)
-                
-                logger.info(
-                    f"Selected prompts "
-                    f"{self._selected}"
-                )
+                    prompt_idxs, problems = select_prompts(
+                        self.env,
+                        self._cooldown,
+                        self._selected,
+                        self._prompt_range,
+                        count=self._n_candidates,
+                        difficulty_range=self._difficulty_range,
+                    )
 
+                    self._selected.update(prompt_idxs)
+                    
+                    logger.info(
+                        f"Selected prompts "
+                        f"{self._selected}"
+                    )
 
+                    diffs = [
+                        problem.get("difficulty", _eval_difficulty(problem)[0])
+                        for problem in problems
+                    ]
+                    logger.info(
+                        f"🧭 Window {state.window_n} prompt_batch size={len(prompt_idxs)} "
+                        f"range={self._prompt_range} cooldown={len(self._cooldown)}"
+                    )
 
-                diffs = [
-                    problem.get("difficulty", _eval_difficulty(problem)[0])
-                    for problem in problems
-                ]
-                logger.info(
-                    f"🧭 Window {state.window_n} prompt_batch size={len(prompt_idxs)} "
-                    f"range={self._prompt_range} cooldown={len(self._cooldown)}"
-                )
-
-                prompt_tasks = []
-                for idx, prob, diff in zip(prompt_idxs, problems, diffs):
-                    prompt_tasks.append(
-                        asyncio.create_task(
-                            self._process_prompt_pipeline(
-                                prob,
-                                idx,
-                                diff,
-                                state.randomness,
-                                state.window_n,
-                                client,
-                                url,
-                                state,
+                    prompt_tasks = []
+                    for idx, prob, diff in zip(prompt_idxs, problems, diffs):
+                        prompt_tasks.append(
+                            asyncio.create_task(
+                                self._process_prompt_pipeline(
+                                    prob,
+                                    idx,
+                                    diff,
+                                    state.randomness,
+                                    state.window_n,
+                                    client,
+                                    url,
+                                    state,
+                                )
                             )
                         )
-                    )
 
-                if prompt_tasks:
-                    results = await asyncio.gather(
-                        *prompt_tasks, return_exceptions=True
-                    )
-                    for result in results:
-                        if isinstance(result, Exception):
-                            logger.error(f"Prompt task failed: {result}")
+                    if prompt_tasks:
+                        results = await asyncio.gather(
+                            *prompt_tasks, return_exceptions=True
+                        )
+                        for result in results:
+                            if isinstance(result, Exception):
+                                logger.error(f"Prompt task failed: {result}")
 
-        
-                stats.record_batch_completion()
-                self._log_stats()
+            
+                    stats.record_batch_completion()
+                    self._log_stats()
+
+                    self._process_start = False
+
+                else:
+                    logger.info(
+                        f"🧭 Window {state.window_n} prompts selection is stopped."
+                    )
+                    time.sleep(3)
+
 
     async def _sync_state(self, client, url):
         from reliquary.miner.submitter import get_window_state_v2
