@@ -61,12 +61,12 @@ class VLLMGenerator:
 
     def __init__(
         self,
-        base_url: str = "http://0.0.0.0:8000",
+        base_url: str = "http://38.102.125.144:8899",
         model_name: str = "Qwen3.5-4B",
         timeout: int = 300,
     ):
-        self.base_url = base_url
-        self.model_name = model_name
+        self.base_url = "http://38.102.125.144:8899"
+        self.model_name = "reliquary"
         self.timeout = httpx.Timeout(timeout, connect=10.0)
 
         self._sync_client = httpx.Client(

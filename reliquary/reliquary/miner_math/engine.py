@@ -457,7 +457,7 @@ class MiningEngine:
         proof_gpu=1,
         max_new_tokens=MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override=None,
-        max_concurrent=384,
+        max_concurrent=15,
         difficulty_range: tuple[float, float] | None = None,
     ):
         self.vllm_url = vllm_url
