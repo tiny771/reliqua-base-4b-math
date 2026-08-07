@@ -465,7 +465,9 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (3.5, 5.5)
-        self._n_candidates = 120
+        self._n_candidates = 30
+
+        self._n_passed_first =0
 
         self._process_start = True
 
@@ -523,6 +525,7 @@ class MiningEngine:
                     await asyncio.sleep(0.5)
                     self._selected = set()
                     self._process_start = True
+                    self._n_passed_first = 0
                     continue
     
 
@@ -1277,6 +1280,7 @@ class MiningEngine:
 
             # Stage 2: only launch the remaining rollouts after the first rollout
             # has already passed the stage-one gate.
+            self._n_passed_first += 1
             results = [first_result]
             pending = {
                 asyncio.create_task(
@@ -1633,6 +1637,7 @@ class MiningEngine:
             f"📊 [OPTIMIZED MINER STATS] uptime={s['uptime_min']}m | prompts={s['prompts']} | "
             f"{s['tokens_per_sec']} tok/s | avg_gen={s['avg_gen_sec']}s | "
             f"cycle_time={cycle_time}s | ({self._n_candidates}candidates) | "
+            f"passed_first={self._n_passed_first} | "
             # f"u_list_gen={s['avg_u_list_gen_ms']:.2f}ms | accept={s['accepted_rate']}% | "
             f"accept={s['accepted_rate']}% | "
             f"rollouts={stats.rollouts_generated} | proof_avg={round(statistics.mean(stats.proof_times), 3) if stats.proof_times else 0:.3f}s"

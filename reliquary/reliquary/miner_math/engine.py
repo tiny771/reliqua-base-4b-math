@@ -468,10 +468,11 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (3.5, 4.5)
-        self._n_candidates = 24
+        self._difficulty_range = (5.5, 6.5)
+        self._n_candidates = 18
 
         self._process_start = True
+        self._bft_n_candidates = 0
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -913,7 +914,7 @@ class MiningEngine:
                     rollout_idx,
                     prompt_idx,
                 )
-                return None
+                return None, False
 
             if result is not None:
                 result.rollout_idx = rollout_idx
@@ -971,7 +972,7 @@ class MiningEngine:
                         rollout_idx,
                         prompt_idx,
                     )
-                    return None
+                    return None, False
 
                 if bft_result.finish_reason != "stop" and FORCED_EOS_INJECT:
                     boxed_end_idx = self._find_boxed_end(bft_result.text)
@@ -1020,9 +1021,9 @@ class MiningEngine:
                 bft_result.rollout_idx = rollout_idx
                 bft_result.finish_reason = "bft_length"
 
-                return bft_result
+                return bft_result, True
 
-            return result
+            return result, False
 
         except Exception as e:
             logger.exception(
@@ -1178,6 +1179,9 @@ class MiningEngine:
             # Stage 2: only launch the remaining rollouts after the first rollout
             # has already passed the stage-one gate.
             results = []
+
+            bft_state = False
+
             pending = {
                 asyncio.create_task(
                     self._generate_single_rollout(
@@ -1205,7 +1209,7 @@ class MiningEngine:
                 )
                 for task in done:
                     try:
-                        result = task.result()
+                        result, result_state = task.result()
                     except Exception as exc:
                         logger.error(
                             f"⚠️ Rollout task failed for #{prompt_idx}: {exc}"
@@ -1233,8 +1237,13 @@ class MiningEngine:
                         )
                         return []
 
+                    if result_state:
+                        bft_state = True
+
                     results.append(result)
                     if len(results) >= M_ROLLOUTS:
+                        if bft_state:
+                            self._bft_n_candidates += 1
                         await _abort_batch()
                         results.sort(
                             key=lambda r: getattr(r, "rollout_idx", -1)
@@ -1251,6 +1260,8 @@ class MiningEngine:
                             f"| diff={diff:.2f}"
                         )
                         return results
+
+
 
             results.sort(key=lambda r: getattr(r, "rollout_idx", -1))
             duration = time.time() - start
@@ -1527,6 +1538,7 @@ class MiningEngine:
             f"{s['tokens_per_sec']} tok/s | avg_gen={s['avg_gen_sec']}s | "
             f"cycle_time={cycle_time}s | ({self._n_candidates}candidates) | "
             # f"u_list_gen={s['avg_u_list_gen_ms']:.2f}ms | accept={s['accepted_rate']}% | "
+            f"bft_candidates={self._bft_n_candidates} | "
             f"accept={s['accepted_rate']}% | "
             f"rollouts={stats.rollouts_generated} | proof_avg={round(statistics.mean(stats.proof_times), 3) if stats.proof_times else 0:.3f}s"
         )

@@ -469,7 +469,7 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (3.5, 4.5)
-        self._n_candidates = 24
+        self._n_candidates = 16
 
         self._process_start = True
 
