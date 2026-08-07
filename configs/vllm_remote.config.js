@@ -25,7 +25,7 @@ module.exports = {
     {
       name: 'checkpoint-manager',
       script: 'checkpoint_manager.py',
-      interpreter: 'python3',           // or 'python' if you prefer
+      interpreter: '/root/reliquary-miner/.venv-vllm/bin/python',
       args: '--endpoint http://209.20.157.231:8080/state --model-dir ./model --poll-interval 60',
       cwd: '/root/reliquary-miner',
       out_file: './logs/checkpoint-out.log',
