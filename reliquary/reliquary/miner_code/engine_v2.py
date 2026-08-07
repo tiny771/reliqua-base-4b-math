@@ -671,7 +671,7 @@ class MiningEngine:
             if last_tokens:
                 last_token_text = self.tokenizer.decode([last_tokens[-1]])
             logger.warning(
-                f"⚠️ #{prompt_idx} -> stage-two malformed rollout rejected "
+                f"⚠️ #{prompt_idx} -> rejected "
                 f"| rollout={getattr(result, 'rollout_idx', 0)} "
                 f"| final_token={last_token_text} "
                 f"| pstop={last_logprob} "
