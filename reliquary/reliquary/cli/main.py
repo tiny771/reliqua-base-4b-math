@@ -727,7 +727,7 @@ def mine_code(
     import torch
     from reliquary.environment import load_environments
     from reliquary.infrastructure.chain import get_subtensor
-    from reliquary.miner_code.engine import MiningEngine   # ← your refactored engine
+    from reliquary.miner_code.engine_v2 import MiningEngine   # ← your refactored engine
     from reliquary.shared.modeling import load_text_generation_model, load_tokenizer
 
     wallet = bt.Wallet(name="dashi", hotkey="miner-3")

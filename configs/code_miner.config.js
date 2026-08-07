@@ -23,29 +23,29 @@ module.exports = {
       min_uptime: '10s',
       kill_timeout: 5000,
     },
-    {
-      name: 'vllm-server',
-      script: '/root/reliquary-miner/.venv-vllm/bin/vllm',
-      interpreter: '/root/reliquary-miner/.venv-vllm/bin/python',
-      args: 'serve ReliquaryForge/qwen3.5-4b-reliquary-v4 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.9 --max-model-len 8192 --served-model-name reliquary --language-model-only --logits-processors reliquary.miner_code.logit_processor:ForcedSeedLogitsProcessor',
-      cwd: '/root/reliquary-miner',
-      out_file: './logs/vllm-out.log',
-      error_file: './logs/vllm-err.log',
-      merge_logs: true,
-      autorestart: true,
-      watch: false,
-      max_restarts: 10,
-      min_uptime: '30s',
-      env: {
-        CUDA_VISIBLE_DEVICES: '0',
-        VLLM_SERVER_DEV_MODE: '1',
-        PYTHONPATH: '.',
-        PYTHONUNBUFFERED: '1',
-        RELIQUARY_PROTOCOL_PROFILE:'qwen35-4b-auction-v3',
-        // Add any other environment variables needed
-      },
-      kill_timeout: 5000,
-    },
+    // {
+    //   name: 'vllm-server',
+    //   script: '/root/reliquary-miner/.venv-vllm/bin/vllm',
+    //   interpreter: '/root/reliquary-miner/.venv-vllm/bin/python',
+    //   args: 'serve ReliquaryForge/qwen3.5-4b-reliquary-v4 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.9 --max-model-len 8192 --served-model-name reliquary --language-model-only --logits-processors reliquary.miner_code.logit_processor:ForcedSeedLogitsProcessor',
+    //   cwd: '/root/reliquary-miner',
+    //   out_file: './logs/vllm-out.log',
+    //   error_file: './logs/vllm-err.log',
+    //   merge_logs: true,
+    //   autorestart: true,
+    //   watch: false,
+    //   max_restarts: 10,
+    //   min_uptime: '30s',
+    //   env: {
+    //     CUDA_VISIBLE_DEVICES: '0',
+    //     VLLM_SERVER_DEV_MODE: '1',
+    //     PYTHONPATH: '.',
+    //     PYTHONUNBUFFERED: '1',
+    //     RELIQUARY_PROTOCOL_PROFILE:'qwen35-4b-auction-v3',
+    //     // Add any other environment variables needed
+    //   },
+    //   kill_timeout: 5000,
+    // },
     {
       name: 'reliquary-mine',
 
@@ -56,7 +56,7 @@ module.exports = {
       interpreter: '/root/reliquary-miner/.venv/bin/python',
 
       // Pass the original arguments
-      args: 'mine-code --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 200 --environments opencodeinstruct',
+      args: 'mine-code --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 200 --environments opencodeinstruct --vllm-base-url http://38.102.125.144:8001',
 
       // Working directory (adjust if needed)
       cwd: '/root/reliquary-miner',

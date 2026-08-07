@@ -298,7 +298,7 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (0, 20)
-        self._n_candidates = 10
+        self._n_candidates = 50
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -321,7 +321,7 @@ class MiningEngine:
         self._analysis_log_path = self._results_dir / "miner_analysis.jsonl"
         self._submission_log_path = self._results_dir / "submission_results.jsonl"
         self._results_dir.mkdir(parents=True, exist_ok=True)
-        self._vllm_client = VLLMGenerator(base_url=vllm_url, model_name="reliquary")
+        self._vllm_client = VLLMGenerator(base_url=vllm_url, model_name="./models/glm")
         logger.info(
             f"🚀 Miner ready | concurrency={max_concurrent} | results_dir={self._results_dir}"
         )
@@ -351,11 +351,12 @@ class MiningEngine:
             )
 
             active_tasks = {}
-            last_state = WindowState.READY
+            last_state = WindowState.OPEN
+            state = None
 
             while True:
+                last_state = state.state if state is not None else WindowState.READY
                 state = await self._sync_state(client, url)
-                last_state = state.state if state is not None else None
                 if (
                     not state
                     or state.state != WindowState.OPEN
@@ -369,14 +370,12 @@ class MiningEngine:
                         await self._vllm_client.cancel_all_requests()
                         self._selected = set()
 
+                    logger.info(f"⏳ Window Not Acitve Yet...")
                     await asyncio.sleep(0.5)
                     continue
 
                 if last_state != WindowState.OPEN:
-                    logger.info(
-                        f"🧭 Window {state.window_n} prompt_batch size={len(prompt_idxs)} "
-                        f"range={self._prompt_range} cooldown={len(self._cooldown)}"
-                    )
+                    logger.info(f"🧭 Window {state.window_n} Started")
 
                 needed = self._n_candidates - len(active_tasks)
                 if needed > 0:
@@ -621,7 +620,9 @@ class MiningEngine:
             sigma = rewards_std(rewards)
 
             if sigma < 0.433:
-                logger.info(f"⏭️ #{prompt_idx} -> SKIPPED | sigma={sigma:.3f}")
+                logger.info(
+                    f"⏭️ #{prompt_idx} -> SKIPPED | sigma={sigma:.3f} | rewards={rewards}"
+                )
                 await queue.put(("abort", prompt_idx))
                 await self._record_analysis_result(
                     {
@@ -954,7 +955,10 @@ class MiningEngine:
                 del old
             await asyncio.to_thread(torch.cuda.empty_cache)
 
-            self._vllm_client._reload_weight(local_path)
+            if "0.0.0.0" in self._vllm_client.base_url:
+                self._vllm_client._reload_weight(local_path)
+            else:
+                self._vllm_client._reload_weight()
 
             self._loaded_checkpoint_path = local_path
             logger.info("✅ Checkpoint loaded successfully")
