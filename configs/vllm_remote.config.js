@@ -1,0 +1,45 @@
+module.exports = {
+  apps: [
+    // {
+    //   name: 'vllm-server',
+    //   script: '/root/reliquary-miner/.venv-vllm/bin/vllm',
+    //   interpreter: '/root/reliquary-miner/.venv-vllm/bin/python',
+    //   args: 'serve ReliquaryForge/qwen3.5-4b-reliquary-v4 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.9 --max-model-len 8192 --served-model-name reliquary --language-model-only --logits-processors reliquary.miner_code.logit_processor:ForcedSeedLogitsProcessor',
+    //   cwd: '/root/reliquary-miner',
+    //   out_file: './logs/vllm-out.log',
+    //   error_file: './logs/vllm-err.log',
+    //   merge_logs: true,
+    //   autorestart: true,
+    //   watch: false,
+    //   max_restarts: 10,
+    //   min_uptime: '30s',
+    //   env: {
+    //     CUDA_VISIBLE_DEVICES: '0',
+    //     VLLM_SERVER_DEV_MODE: '1',
+    //     PYTHONPATH: '.',
+    //     PYTHONUNBUFFERED: '1',
+    //     RELIQUARY_PROTOCOL_PROFILE: 'qwen35-4b-auction-v3',
+    //   },
+    //   kill_timeout: 5000,
+    // },
+    {
+      name: 'checkpoint-manager',
+      script: 'checkpoint_manager.py',
+      interpreter: 'python3',           // or 'python' if you prefer
+      args: '--endpoint http://209.20.157.231:8080/state --model-dir ./model --poll-interval 60',
+      cwd: '/root/reliquary-miner',
+      out_file: './logs/checkpoint-out.log',
+      error_file: './logs/checkpoint-err.log',
+      merge_logs: true,
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      min_uptime: '30s',
+      env: {
+        PYTHONPATH: '.',
+        PYTHONUNBUFFERED: '1',
+      },
+      kill_timeout: 5000,
+    },
+  ],
+};

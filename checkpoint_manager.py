@@ -54,7 +54,7 @@ def save_checkpoint_state(checkpoint_info: Dict[str, Any]) -> None:
 def fetch_state() -> Optional[Dict[str, Any]]:
     """
     Fetch the /state endpoint.
-    
+
     Returns:
         Dict with keys: state, window_n, checkpoint_n, checkpoint_repo_id, checkpoint_revision, cooldown_prompts
         None if request fails.
@@ -75,7 +75,7 @@ def backup_old_model() -> None:
         try:
             shutil.move(str(MODEL_DIR), str(backup_dir))
             logger.info(f"Backed up old model to {backup_dir}")
-            
+
             # Optional: remove backup after a delay or keep only last N backups
             # For now, we keep the backup for safety
         except Exception as e:
@@ -85,24 +85,24 @@ def backup_old_model() -> None:
 def download_checkpoint(repo_id: str, revision: str) -> bool:
     """
     Download the checkpoint using hf.snapshot_download() to a specific local directory.
-    
+
     Args:
         repo_id: The Hugging Face repository ID (e.g., "owner/model-name")
         revision: The specific revision/commit hash
-        
+
     Returns:
         True if download succeeded, False otherwise.
     """
     try:
         logger.info(f"Starting download: repo_id={repo_id}, revision={revision}")
-        
+
         # Ensure the parent directory exists
         MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # If old model exists, backup it first
         if MODEL_DIR.exists():
             backup_old_model()
-        
+
         # Download to local_dir - this maintains the original file structure
         # and creates a .cache/huggingface/ folder for metadata
         downloaded_path = snapshot_download(
@@ -112,10 +112,10 @@ def download_checkpoint(repo_id: str, revision: str) -> bool:
             # Optional: filter patterns to exclude large files if needed
             # allow_patterns=["*.json", "*.safetensors", "*.txt", ".gitattributes"],
         )
-        
+
         logger.info(f"Successfully downloaded checkpoint to {downloaded_path}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to download checkpoint: {e}")
         # Attempt to restore from backup if download failed
@@ -167,33 +167,37 @@ def cleanup_hf_cache_metadata() -> None:
 def monitor_and_update(poll_interval: int = 60) -> None:
     """
     Main loop: continuously monitor /state and download when checkpoint updates.
-    
+
     Args:
         poll_interval: Seconds between state polls
     """
     cached_state = load_cached_checkpoint_state()
-    current_checkpoint_revision = cached_state.get("checkpoint_revision") if cached_state else None
-    
+    current_checkpoint_revision = (
+        cached_state.get("checkpoint_revision") if cached_state else None
+    )
+
     logger.info(f"Starting checkpoint monitor (poll interval: {poll_interval}s)")
     if current_checkpoint_revision:
         logger.info(f"Current checkpoint revision: {current_checkpoint_revision}")
-    
+
     while True:
         try:
             state = fetch_state()
-            
+
             if state is None:
                 logger.warning("Failed to fetch state, retrying...")
                 time.sleep(poll_interval)
                 continue
-            
+
             checkpoint_repo_id = state.get("checkpoint_repo_id")
             checkpoint_revision = state.get("checkpoint_revision")
             checkpoint_n = state.get("checkpoint_n")
             window_n = state.get("window_n")
-            
-            logger.debug(f"State: window={window_n}, checkpoint_n={checkpoint_n}, revision={checkpoint_revision}")
-            
+
+            logger.debug(
+                f"State: window={window_n}, checkpoint_n={checkpoint_n}, revision={checkpoint_revision}"
+            )
+
             # Check if checkpoint has updated
             if checkpoint_revision != current_checkpoint_revision:
                 logger.info(
@@ -202,31 +206,33 @@ def monitor_and_update(poll_interval: int = 60) -> None:
                     f"  New revision: {checkpoint_revision}\n"
                     f"  Repo: {checkpoint_repo_id}"
                 )
-                
+
                 # Download the new checkpoint
                 if download_checkpoint(checkpoint_repo_id, checkpoint_revision):
                     current_checkpoint_revision = checkpoint_revision
-                    
+
                     # Save the new checkpoint state
-                    save_checkpoint_state({
-                        "checkpoint_revision": checkpoint_revision,
-                        "checkpoint_repo_id": checkpoint_repo_id,
-                        "checkpoint_n": checkpoint_n,
-                        "last_update": time.time(),
-                    })
-                    
+                    save_checkpoint_state(
+                        {
+                            "checkpoint_revision": checkpoint_revision,
+                            "checkpoint_repo_id": checkpoint_repo_id,
+                            "checkpoint_n": checkpoint_n,
+                            "last_update": time.time(),
+                        }
+                    )
+
                     # Optionally clean up HF cache metadata
                     cleanup_hf_cache_metadata()
-                    
+
                     # Clean up old backups
                     cleanup_old_backups(keep_count=2)
-                    
+
                     logger.info("Checkpoint update completed successfully")
                 else:
                     logger.error("Checkpoint download failed")
-            
+
             time.sleep(poll_interval)
-            
+
         except KeyboardInterrupt:
             logger.info("Checkpoint monitor stopped by user")
             break
@@ -238,7 +244,7 @@ def monitor_and_update(poll_interval: int = 60) -> None:
 def main():
     """Entry point."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Monitor /state endpoint and download checkpoint updates"
     )
@@ -265,13 +271,13 @@ def main():
         action="store_true",
         help="Download checkpoint once and exit (instead of continuous monitoring)",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Override globals if provided
     globals()["STATE_ENDPOINT"] = args.endpoint
     globals()["MODEL_DIR"] = args.model_dir
-    
+
     if args.once:
         # One-time download
         logger.info("Running in one-time mode")
@@ -280,12 +286,14 @@ def main():
             checkpoint_repo_id = state.get("checkpoint_repo_id")
             checkpoint_revision = state.get("checkpoint_revision")
             download_checkpoint(checkpoint_repo_id, checkpoint_revision)
-            save_checkpoint_state({
-                "checkpoint_revision": checkpoint_revision,
-                "checkpoint_repo_id": checkpoint_repo_id,
-                "checkpoint_n": state.get("checkpoint_n"),
-                "last_update": time.time(),
-            })
+            save_checkpoint_state(
+                {
+                    "checkpoint_revision": checkpoint_revision,
+                    "checkpoint_repo_id": checkpoint_repo_id,
+                    "checkpoint_n": state.get("checkpoint_n"),
+                    "last_update": time.time(),
+                }
+            )
     else:
         # Continuous monitoring
         monitor_and_update(poll_interval=args.poll_interval)
