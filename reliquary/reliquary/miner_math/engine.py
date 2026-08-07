@@ -457,7 +457,7 @@ class MiningEngine:
         proof_gpu=1,
         max_new_tokens=MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override=None,
-        max_concurrent=15,
+        max_concurrent=30,
         difficulty_range: tuple[float, float] | None = None,
     ):
         self.vllm_url = vllm_url
@@ -468,8 +468,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (4.5, 5.5)
-        self._n_candidates = 18
+        self._difficulty_range = (3.5, 5.5)
+        self._n_candidates = 40
 
         self._process_start = True
         self._bft_n_candidates = 0
