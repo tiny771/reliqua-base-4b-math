@@ -468,7 +468,7 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (5.5, 6.5)
+        self._difficulty_range = (4.5, 5.5)
         self._n_candidates = 18
 
         self._process_start = True
