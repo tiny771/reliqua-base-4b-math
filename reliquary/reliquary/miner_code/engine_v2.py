@@ -9,6 +9,7 @@ Key features:
 - Two-stage quality gating for prompt frontier optimization
 - GRAIL sketch commitments for cryptographic authenticity proof
 - Precommit/reveal submission flow for auction fairness
+- Split generation and proof/submission pipelines for maximum GPU utilization
 """
 
 from __future__ import annotations
@@ -16,14 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import random as _random
-import re
-import statistics
 import time
-import traceback
-from collections import deque
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,50 +64,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-# ====================== Stats ======================
-class MinerStats:
-    def __init__(self):
-        self.prompts_processed = 0
-        self.rollouts_generated = 0
-        self.submissions_accepted = 0
-        self.total_tokens = 0
-        self.gen_times: deque = deque(maxlen=200)
-        self.proof_times: deque = deque(maxlen=100)
-        self.start_time = time.time()
-        self.last_selection_time: float | None = None
-        self.last_batch_completion_time: float | None = None
-
-    def record_generation(self, duration: float, tokens: int):
-        self.gen_times.append(duration)
-        self.total_tokens += tokens
-        self.rollouts_generated += 1
-
-    def record_selection(self) -> None:
-        self.last_selection_time = time.time()
-
-    def record_batch_completion(self) -> None:
-        self.last_batch_completion_time = time.time()
-
-    def get_stats(self) -> Dict:
-        elapsed = time.time() - self.start_time
-        return {
-            "uptime_min": round(elapsed / 60, 1),
-            "prompts": self.prompts_processed,
-            "tokens_per_sec": (
-                round(self.total_tokens / elapsed, 1) if elapsed > 0 else 0
-            ),
-            "avg_gen_sec": (
-                round(statistics.mean(self.gen_times), 2) if self.gen_times else 0
-            ),
-            "accepted_rate": round(
-                self.submissions_accepted / max(self.prompts_processed, 1) * 100, 1
-            ),
-        }
-
-
-stats = MinerStats()
-
-
 # ====================== Helpers ======================
 async def maybe_pull_checkpoint(
     state, local_n, local_hash, local_model, load_fn, download_fn, lock
@@ -148,7 +101,6 @@ async def _hf_download(repo_id: str, revision: str) -> str:
 
 # Score cache to avoid repeated difficulty evaluation across prompt selection rounds.
 _prompt_difficulty_cache: Dict[int, float] = {}
-
 _prompt_state_cache: Dict[int, bool] = {}
 
 
@@ -261,7 +213,6 @@ def select_prompts(
         problem["difficulty"] = _prompt_difficulty_cache.get(idx, 0.0)
         problems.append(problem)
 
-    stats.record_selection()
     logger.info(
         f"🎲 Selected {len(selected_indices)} prompts from range {lo}-{hi} "
         f"difficulty_range={difficulty_range}"
@@ -310,12 +261,7 @@ def _build_vllm_extra_body(
     base_offset: int = 0,
     start_len: int | None = None,
 ) -> Dict[str, object]:
-    """Build extra_body parameters for ForcedSeedLogitsProcessor.
-
-    These parameters are passed to vLLM's SamplingParams.extra_args and
-    extracted by ForcedSeedLogitsProcessor to compute deterministic u_at()
-    uniform draws per token position.
-    """
+    """Build extra_body parameters for ForcedSeedLogitsProcessor."""
     return {
         "randomness": randomness,
         "prompt_idx": prompt_idx,
@@ -352,7 +298,7 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (0, 20)
-        self._n_candidates = 15
+        self._n_candidates = 10
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -373,7 +319,6 @@ class MiningEngine:
         self._preflight_perplexity_threshold: float | None = None
         self._results_dir = Path(__file__).resolve().parents[3] / "results"
         self._analysis_log_path = self._results_dir / "miner_analysis.jsonl"
-        self._summary_path = self._results_dir / "miner_summary.json"
         self._submission_log_path = self._results_dir / "submission_results.jsonl"
         self._results_dir.mkdir(parents=True, exist_ok=True)
         self._vllm_client = VLLMGenerator(base_url=vllm_url, model_name="reliquary")
@@ -385,10 +330,7 @@ class MiningEngine:
         import httpx
 
         from reliquary.miner.submitter import (
-            SubmissionError,
             discover_validator_url,
-            get_window_state_v2,
-            submit_batch_v2,
         )
         from reliquary.protocol.submission import WindowState
 
@@ -401,35 +343,57 @@ class MiningEngine:
             url = discover_validator_url(metagraph)
 
         async with httpx.AsyncClient(timeout=240) as client:
+            # Queue for passing completed rollouts to the proof/submission worker
+            queue = asyncio.Queue()
+            # Start the background worker for proof building and submission
+            worker_task = asyncio.create_task(
+                self._proof_and_submit_worker(queue, client, url)
+            )
+
+            active_tasks = {}
+            last_state = WindowState.READY
+
             while True:
                 state = await self._sync_state(client, url)
-                if not state or state.state != WindowState.OPEN or not state.randomness or TEST_MODE:
-                    await self._vllm_client.cancel_all_requests()
+                last_state = state.state if state is not None else None
+                if (
+                    not state
+                    or state.state != WindowState.OPEN
+                    or not state.randomness
+                    or TEST_MODE
+                ):
+                    if last_state == WindowState.OPEN:
+                        for t in active_tasks:
+                            t.cancel()
+                        active_tasks.clear()
+                        await self._vllm_client.cancel_all_requests()
+                        self._selected = set()
+
                     await asyncio.sleep(0.5)
-                    self._selected = {}
                     continue
 
-                prompt_idxs, problems = select_prompts(
-                    self.env,
-                    self._cooldown,
-                    self._selected,
-                    self._prompt_range,
-                    count=self._n_candidates,
-                    difficulty_range=self._difficulty_range,
-                )
-                diffs = [
-                    problem.get("difficulty", _eval_difficulty(problem)[0])
-                    for problem in problems
-                ]
-                logger.info(
-                    f"🧭 Window {state.window_n} prompt_batch size={len(prompt_idxs)} "
-                    f"range={self._prompt_range} cooldown={len(self._cooldown)}"
-                )
+                if last_state != WindowState.OPEN:
+                    logger.info(
+                        f"🧭 Window {state.window_n} prompt_batch size={len(prompt_idxs)} "
+                        f"range={self._prompt_range} cooldown={len(self._cooldown)}"
+                    )
 
-                prompt_tasks = []
-                for idx, prob, diff in zip(prompt_idxs, problems, diffs):
-                    prompt_tasks.append(
-                        asyncio.create_task(
+                needed = self._n_candidates - len(active_tasks)
+                if needed > 0:
+                    prompt_idxs, problems = select_prompts(
+                        self.env,
+                        self._cooldown,
+                        self._selected,
+                        self._prompt_range,
+                        count=needed,
+                        difficulty_range=self._difficulty_range,
+                    )
+
+                    for idx, prob in zip(prompt_idxs, problems):
+                        diff = prob.get("difficulty", _eval_difficulty(prob)[0])
+                        self._selected.add(idx)
+
+                        task = asyncio.create_task(
                             self._process_prompt_pipeline(
                                 prob,
                                 idx,
@@ -439,20 +403,102 @@ class MiningEngine:
                                 client,
                                 url,
                                 state,
+                                queue,
                             )
+                        )
+
+                        active_tasks[task] = idx
+
+                        logger.info(
+                            f"🚀 Add new prompt prompt_index={idx} difficulty={diff}"
+                        )
+
+                if not active_tasks:
+                    await asyncio.sleep(1.0)
+                    self._selected.clear()
+                    continue
+
+                done, _ = await asyncio.wait(
+                    active_tasks.keys(), return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in done:
+                    idx = active_tasks.pop(task)
+
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"⛔ Prompt task {idx} failed: {e}")
+
+    async def _proof_and_submit_worker(self, queue: asyncio.Queue, client, url):
+        """Background worker that watches the queue, builds GRAIL proofs, and submits batches."""
+        pending_batches = {}  # prompt_idx -> dict of batch info
+
+        while True:
+            try:
+                item = await queue.get()
+                if item is None:  # Poison pill for shutdown
+                    break
+
+                msg_type = item[0]
+                if msg_type == "abort":
+                    _, prompt_idx = item
+                    pending_batches.pop(prompt_idx, None)
+                    continue
+
+                (
+                    _,
+                    prompt_idx,
+                    window_n,
+                    state,
+                    problem,
+                    randomness,
+                    gen_result,
+                    reward,
+                ) = item
+
+                # Run heavy GRAIL proof building in a separate thread to not block the event loop
+                submission = await asyncio.to_thread(
+                    self._build_rollout_submission,
+                    gen_result,
+                    problem,
+                    randomness,
+                    reward,
+                )
+
+                if prompt_idx not in pending_batches:
+                    pending_batches[prompt_idx] = {
+                        "submissions": [],
+                        "window_n": window_n,
+                        "state": state,
+                        "randomness": randomness,
+                        "client": client,
+                        "url": url,
+                    }
+
+                pending_batches[prompt_idx]["submissions"].append(submission)
+
+                # Once we have all rollouts for this prompt, submit the batch
+                if len(pending_batches[prompt_idx]["submissions"]) == M_ROLLOUTS:
+                    batch_info = pending_batches.pop(prompt_idx)
+                    asyncio.create_task(
+                        self._submit(
+                            batch_info["submissions"],
+                            prompt_idx,
+                            batch_info["randomness"],
+                            batch_info["window_n"],
+                            batch_info["state"],
+                            batch_info["client"],
+                            batch_info["url"],
                         )
                     )
 
-                if prompt_tasks:
-                    results = await asyncio.gather(
-                        *prompt_tasks, return_exceptions=True
-                    )
-                    for result in results:
-                        if isinstance(result, Exception):
-                            logger.error(f"Prompt task failed: {result}")
-
-                stats.record_batch_completion()
-                self._log_stats()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception(f"Worker error: {e}")
 
     async def _sync_state(self, client, url):
         from reliquary.miner.submitter import get_window_state_v2
@@ -487,64 +533,96 @@ class MiningEngine:
             return None
 
     async def _process_prompt_pipeline(
-        self, problem, prompt_idx, diff, randomness, window_n, client, url, state
+        self, problem, prompt_idx, diff, randomness, window_n, client, url, state, queue
     ):
         async with self._semaphore:
             prompt, prompt_len = await asyncio.to_thread(
                 self._format_problem, problem.get("prompt")
             )
             ground_truth = problem.get("ground_truth", "")
-            perplexity = 0.0
-            gen_results = await self._generate_rollouts(
-                prompt,
-                prompt_idx,
-                prompt_len,
-                diff,
-                randomness,
-                state.checkpoint_revision,
-                ground_truth,
-            )
-            analysis_metrics = self._collect_rollout_analysis_metrics(
-                gen_results, problem
-            )
 
-            if len(gen_results or []) < M_ROLLOUTS:
-                logger.warning(
-                    f"⏭️  #{prompt_idx} → rollout generation incomplete | count={len(gen_results or [])} | diff={diff:.2f} | perplexity={perplexity:.2f} | reward_vector={analysis_metrics.get('rewards_vector', [])}"
+            # Launch all generation tasks concurrently
+            pending = {
+                asyncio.create_task(
+                    self._generate_single_rollout(
+                        prompt,
+                        prompt_idx,
+                        prompt_len,
+                        rollout_idx,
+                        randomness,
+                        state.checkpoint_revision,
+                        ground_truth,
+                    )
                 )
+                for rollout_idx in range(0, M_ROLLOUTS)
+            }
+
+            passed_rollouts = []
+            aborted = False
+
+            # Process rollouts as they complete (FIRST_COMPLETED)
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for task in done:
+                    try:
+                        result = task.result()
+                    except Exception as exc:
+                        logger.error(f"⚠️ Rollout task failed for #{prompt_idx}: {exc}")
+                        result = None
+
+                    # Check gate and abort if failed
+                    if result is None or not self._passes_stage_two_gate(
+                        result, prompt_idx
+                    ):
+                        aborted = True
+                        for p in pending:
+                            p.cancel()
+                        break
+
+                    # Calculate reward immediately upon passing gate
+                    try:
+                        reward = self.env.compute_reward(problem, result.text)
+                    except Exception:
+                        reward = 0.0
+
+                    passed_rollouts.append((result, reward))
+
+                if aborted:
+                    break
+
+            if aborted or len(passed_rollouts) < M_ROLLOUTS:
+                logger.warning(f"⏭️ #{prompt_idx} -> aborted or incomplete")
+                await queue.put(("abort", prompt_idx))
                 await self._record_analysis_result(
                     {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "prompt_idx": prompt_idx,
                         "window_n": window_n,
                         "status": "rollout_incomplete",
-                        "reason": "incomplete_rollouts",
+                        "reason": (
+                            "incomplete_rollouts" if not aborted else "gate_failed"
+                        ),
                         "diff": diff,
-                        "rollout_count": len(gen_results or []),
+                        "rollout_count": len(passed_rollouts),
                         "prompt_len": prompt_len,
                         "prompt_preview": problem.get("prompt", "")[:160],
                         "solution": problem.get("solution", ""),
                         "solution_len": len(problem.get("solution", "")),
-                        **analysis_metrics,
-                        "completion_rollout_previews": [
-                            getattr(r, "text", "") for r in gen_results or []
-                        ],
-                        "completion_rollout_lengths": [
-                            len(getattr(r, "tokens", []) or [])
-                            for r in gen_results or []
-                        ],
                     }
                 )
-                stats.prompts_processed += 1
                 return
 
-            rewards = [self.env.compute_reward(problem, r.text) for r in gen_results]
+            # Sigma gating (reward variance check)
+            rewards = [r for _, r in passed_rollouts]
             sigma = rewards_std(rewards)
 
             if sigma < 0.433:
-                logger.info(
-                    f"⏭️  #{prompt_idx} → SKIPPED | sigma={sigma:.3f} | rewards={rewards} | diff={diff:.2f} | perp={perplexity:.2f}"
-                )
+                logger.info(f"⏭️ #{prompt_idx} -> SKIPPED | sigma={sigma:.3f}")
+                await queue.put(("abort", prompt_idx))
                 await self._record_analysis_result(
                     {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -553,102 +631,56 @@ class MiningEngine:
                         "status": "sigma_skipped",
                         "reason": "sigma_threshold",
                         "diff": diff,
-                        "perplexity": perplexity,
                         "sigma": sigma,
                         "rewards": rewards,
                         "prompt_len": prompt_len,
                         "prompt_preview": problem.get("prompt", "")[:160],
                         "solution": problem.get("solution", ""),
                         "solution_len": len(problem.get("solution", "")),
-                        **analysis_metrics,
-                        "completion_rollout_previews": [
-                            getattr(r, "text", "") for r in gen_results or []
-                        ],
-                        "completion_rollout_lengths": [
-                            len(getattr(r, "tokens", []) or [])
-                            for r in gen_results or []
-                        ],
                     }
                 )
-                stats.prompts_processed += 1
                 return
 
-            logger.info(
-                f"💎  #{prompt_idx} → PASSED | sigma={sigma:.3f} | rewards={rewards} | diff={diff:.2f} | perp={perplexity:.2f}"
+            logger.info(f"💎 #{prompt_idx} -> PASSED | sigma={sigma:.3f}")
+
+            # Put all passed rollouts into the queue for proof building and submission
+            for gen_result, reward in passed_rollouts:
+                await queue.put(
+                    (
+                        "rollout",
+                        prompt_idx,
+                        window_n,
+                        state,
+                        problem,
+                        randomness,
+                        gen_result,
+                        reward,
+                    )
+                )
+
+    def _passes_stage_two_gate(self, result, prompt_idx: int) -> bool:
+        should_stop, has_malformed = self._should_stop_generation(result)
+        if should_stop and EARLY_STOP_GENERATION:
+            last_tokens = getattr(result, "tokens", None) or []
+            last_logprob = (
+                (getattr(result, "token_logprobs", None) or [])[-1]
+                if getattr(result, "token_logprobs", None)
+                else None
             )
-
-            submissions = [
-                self._build_rollout_submission(g, problem, randomness, rew)
-                for g, rew in zip(gen_results, rewards)
-            ]
-            submit_result = await self._submit(
-                submissions, prompt_idx, randomness, window_n, state, client, url
+            last_token_text = ""
+            if last_tokens:
+                last_token_text = self.tokenizer.decode([last_tokens[-1]])
+            logger.warning(
+                f"⚠️ #{prompt_idx} -> stage-two malformed rollout rejected "
+                f"| rollout={getattr(result, 'rollout_idx', 0)} "
+                f"| final_token={last_token_text} "
+                f"| pstop={last_logprob} "
+                f"| finish_reason={getattr(result, 'finish_reason', None)} "
+                f"| malformed={has_malformed}"
             )
-            await self._record_analysis_result(
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "prompt_idx": prompt_idx,
-                    "window_n": window_n,
-                    "status": "submitted" if submit_result else "submit_failed",
-                    "reason": "submitted" if submit_result else "submit_failed",
-                    "diff": diff,
-                    "perplexity": perplexity,
-                    "sigma": sigma,
-                    "rewards": rewards,
-                    "prompt_len": prompt_len,
-                    "rollout_count": len(gen_results),
-                    "prompt_preview": problem.get("prompt", "")[:160],
-                    "solution": problem.get("solution", ""),
-                    "solution_len": len(problem.get("solution", "")),
-                    **analysis_metrics,
-                    "completion_rollout_previews": [
-                        getattr(r, "text", "") for r in gen_results or []
-                    ],
-                    "completion_rollout_lengths": [
-                        len(getattr(r, "tokens", []) or []) for r in gen_results or []
-                    ],
-                }
-            )
-            stats.prompts_processed += 1
-
-    def _collect_rollout_analysis_metrics(
-        self, rollouts: List[object], problem: Dict | None = None
-    ) -> Dict[str, List[float] | List[int]]:
-        if not rollouts:
-            return {
-                "rewards_vector": [],
-                "pstop_vector": [],
-                "completion_length_vector": [],
-            }
-
-        rewards_vector = []
-        completion_length_vector = []
-        pstop_vector = []
-        for rollout in rollouts:
-            try:
-                reward = self.env.compute_reward(problem, getattr(rollout, "text", ""))
-            except Exception:
-                reward = 0.0
-            rewards_vector.append(reward)
-
-            tokens = getattr(rollout, "tokens", []) or []
-            completion_length_vector.append(len(tokens))
-
-            token_logprobs = getattr(rollout, "token_logprobs", []) or []
-            pstop_vector.append(token_logprobs[-1] if token_logprobs else None)
-
-        return {
-            "rewards_vector": rewards_vector,
-            "pstop_vector": pstop_vector,
-            "completion_length_vector": completion_length_vector,
-        }
-
-    def _should_skip_prompt(self, perplexity: float | None, diff: float) -> bool:
-        if self._preflight_perplexity_threshold is None:
             return False
-        if perplexity is None:
-            return True
-        return float(perplexity) < self._preflight_perplexity_threshold
+
+        return True
 
     def _should_stop_generation(self, rollout: GenerationResult) -> tuple[bool, bool]:
         finish_reason = str(getattr(rollout, "finish_reason", "") or "")
@@ -685,14 +717,12 @@ class MiningEngine:
                 checkpoint_hash=checkpoint_hash,
             )
 
-            # 1. Initial generation
             result = await self._vllm_client.generate_rollout_async(
                 prompt,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
             )
 
-            # 2. Validate initial result
             if not result or not getattr(result, "tokens", None):
                 logger.warning(
                     "⚠️ Rollout #%d for #%d failed validation (empty or missing tokens)",
@@ -712,183 +742,9 @@ class MiningEngine:
             )
             return None
 
-    def _find_boxed_end(self, text: str) -> int:
-        """Finds the index right after the closing '}' of the first \boxed{...}."""
-        brace_count = 1
-        for i in range(len(text)):
-            if text[i] == "{":
-                brace_count += 1
-            elif text[i] == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                    return i + 1
-        return -1
-
-    def _find_token_idx_for_char_idx(
-        self, tokens: List[int], target_char_idx: int
-    ) -> int:
-        """Finds the token index that covers the target character index."""
-        current_text = ""
-        for i, token_id in enumerate(tokens):
-            # Decode single token to accumulate text length
-            current_text += self.tokenizer.decode([token_id], skip_special_tokens=False)
-            if len(current_text) >= target_char_idx:
-                return i + 1
-        return len(tokens)
-
-    def _passes_stage_one_gate(
-        self,
-        result,
-        prompt_idx: int,
-        prompt_len: int | None = None,
-        ground_truth: str | None = None,
-    ) -> bool:
-        should_stop, has_malformed = self._should_stop_generation(result)
-        if should_stop and EARLY_STOP_GENERATION:
-            last_tokens = getattr(result, "tokens", None) or []
-            last_logprob = (
-                (getattr(result, "token_logprobs", None) or [])[-1]
-                if getattr(result, "token_logprobs", None)
-                else None
-            )
-            last_token_text = ""
-            if last_tokens:
-                last_token_text = self.tokenizer.decode([last_tokens[-1]])
-            logger.warning(
-                f"⚠️ #{prompt_idx} → stage-one malformed rollout rejected "
-                f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                f"| final_token={last_token_text} "
-                f"| pstop={last_logprob} "
-                f"| finish_reason={getattr(result, 'finish_reason', None)} "
-                f"| malformed={has_malformed}"
-            )
-            return False
-
-        return True
-
-    def _passes_stage_two_gate(self, result, prompt_idx: int) -> bool:
-        should_stop, has_malformed = self._should_stop_generation(result)
-        if should_stop and EARLY_STOP_GENERATION:
-            last_tokens = getattr(result, "tokens", None) or []
-            last_logprob = (
-                (getattr(result, "token_logprobs", None) or [])[-1]
-                if getattr(result, "token_logprobs", None)
-                else None
-            )
-            last_token_text = ""
-            if last_tokens:
-                last_token_text = self.tokenizer.decode([last_tokens[-1]])
-            logger.warning(
-                f"⚠️ #{prompt_idx} → stage-two malformed rollout rejected "
-                f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                f"| final_token={last_token_text} "
-                f"| pstop={last_logprob} "
-                f"| finish_reason={getattr(result, 'finish_reason', None)} "
-                f"| malformed={has_malformed}"
-            )
-            return False
-
-        return True
-
-    async def _generate_rollouts(
-        self,
-        prompt,
-        prompt_idx,
-        prompt_len,
-        diff,
-        randomness,
-        checkpoint_hash,
-        ground_truth,
-    ) -> List[GenerationResult]:
-        """Two-stage rollout generation: validate one rollout first, then generate the rest."""
-        start = time.time()
-
-        try:
-            # Stage 2: only launch the remaining rollouts after the first rollout
-            # has already passed the stage-one gate.
-            results = []
-            pending = {
-                asyncio.create_task(
-                    self._generate_single_rollout(
-                        prompt,
-                        prompt_idx,
-                        prompt_len,
-                        rollout_idx,
-                        randomness,
-                        checkpoint_hash,
-                        ground_truth,
-                    )
-                )
-                for rollout_idx in range(0, M_ROLLOUTS)
-            }
-
-            async def _abort_batch() -> None:
-                for extra_task in pending:
-                    extra_task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-
-            while pending:
-                done, pending = await asyncio.wait(
-                    pending,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in done:
-                    try:
-                        result = task.result()
-                    except Exception as exc:
-                        logger.error(f"⚠️ Rollout task failed for #{prompt_idx}: {exc}")
-                        result = None
-
-                    if result is None:
-                        await _abort_batch()
-                        duration = time.time() - start
-                        logger.warning(
-                            f"⚠️ #{prompt_idx} → rollout failed "
-                            f"{len(results)}/{M_ROLLOUTS} "
-                            f"| {duration:.2f}s"
-                        )
-                        return []
-
-                    if not self._passes_stage_two_gate(result, prompt_idx):
-                        await _abort_batch()
-                        duration = time.time() - start
-                        logger.warning(
-                            f"⚠️ #{prompt_idx} → later rollout rejected at stage-two gate "
-                            f"| rollout={getattr(result, 'rollout_idx', 0)} "
-                            f"| generated={len(results)}/{M_ROLLOUTS} "
-                            f"| {duration:.2f}s"
-                        )
-                        return []
-
-                    results.append(result)
-                    if len(results) >= M_ROLLOUTS:
-                        await _abort_batch()
-                        results.sort(key=lambda r: getattr(r, "rollout_idx", -1))
-                        duration = time.time() - start
-                        tokens_est = sum(len(getattr(r, "tokens", [])) for r in results)
-                        stats.record_generation(duration, tokens_est)
-                        logger.info(
-                            f"⚡ #{prompt_idx} → "
-                            f"{len(results)}/{M_ROLLOUTS} rollouts "
-                            f"in {duration:.2f}s "
-                            f"| diff={diff:.2f}"
-                        )
-                        return results
-
-            results.sort(key=lambda r: getattr(r, "rollout_idx", -1))
-            duration = time.time() - start
-            tokens_est = sum(len(getattr(r, "tokens", [])) for r in results)
-            stats.record_generation(duration, tokens_est)
-            return results
-
-        except Exception as e:
-            logger.exception(f"⚠️ Gen fail #{prompt_idx}: {e}")
-            return []
-
     async def _record_analysis_result(self, record: Dict):
         self._results_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._append_analysis_record, record)
-        await self._write_summary_report()
 
     def _append_analysis_record(self, record: Dict):
         with self._analysis_log_path.open("a", encoding="utf-8") as handle:
@@ -901,25 +757,6 @@ class MiningEngine:
     def _append_submission_record(self, record: Dict):
         with self._submission_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, default=str, sort_keys=True) + "\n")
-
-    async def _write_summary_report(self):
-        await asyncio.to_thread(self._write_summary_report_sync)
-
-    def _write_summary_report_sync(self):
-        summary = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "prompts_processed": stats.prompts_processed,
-            "rollouts_generated": stats.rollouts_generated,
-            "submissions_accepted": stats.submissions_accepted,
-            "avg_gen_sec": (
-                round(statistics.mean(stats.gen_times), 3) if stats.gen_times else 0
-            ),
-            "avg_proof_sec": (
-                round(statistics.mean(stats.proof_times), 3) if stats.proof_times else 0
-            ),
-        }
-        with self._summary_path.open("w", encoding="utf-8") as handle:
-            json.dump(summary, handle, indent=2, sort_keys=True)
 
     def _format_problem(self, prompt: str) -> tuple[str, list[int]]:
         message = [{"role": "user", "content": prompt}]
@@ -984,9 +821,6 @@ class MiningEngine:
         signature = sign_commit_binding(
             all_tokens, randomness, model_name, LAYER_INDEX, commitments, self.wallet
         )
-
-        duration = time.time() - start
-        stats.proof_times.append(duration)
 
         return {
             "tokens": all_tokens,
@@ -1083,10 +917,7 @@ class MiningEngine:
                     ),
                 }
             )
-            if resp.accepted:
-                stats.submissions_accepted += 1
-                return True
-            return False
+            return resp.accepted
         except SubmissionError as exc:
             logger.error(f"Submit failed for prompt {prompt_idx}: {exc}")
             return False
@@ -1131,17 +962,3 @@ class MiningEngine:
         except Exception as e:
             logger.exception(f"Checkpoint load failed: {e}")
             return getattr(self, "hf_model", None), False
-
-    def _log_stats(self):
-        s = stats.get_stats()
-        start_time = stats.last_selection_time or stats.start_time
-        end_time = stats.last_batch_completion_time or time.time()
-        cycle_time = max(0.0, end_time - start_time)
-        cycle_time = round(cycle_time, 1)
-        logger.info(
-            f"📊 [MINER STATS] uptime={s['uptime_min']}m | prompts={s['prompts']} | "
-            f"{s['tokens_per_sec']} tok/s | avg_gen={s['avg_gen_sec']}s | "
-            f"cycle_time={cycle_time}s | ({self._n_candidates}candidates) | "
-            f"accept={s['accepted_rate']}% | "
-            f"rollouts={stats.rollouts_generated} | proof_avg={round(statistics.mean(stats.proof_times), 3) if stats.proof_times else 0:.3f}s"
-        )

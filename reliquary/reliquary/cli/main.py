@@ -710,5 +710,50 @@ def mine_math(
     asyncio.run(engine.mine_window(subtensor))
 
 
+@app.command()
+def mine_code(
+    checkpoint: str = typer.Option(..., help="Initial model checkpoint path or HF repo"),
+    validator_url: str = typer.Option("", help="Validator URL override"),
+    environments: str = typer.Option(os.getenv("RELIQUARY_ENVIRONMENTS", _DEFAULT_ENVS)),
+    log_level: str = typer.Option("INFO"),
+    max_concurrent: int = typer.Option(16, help="Max concurrent prompt generations"),
+    vllm_base_url: str = typer.Option("http://0.0.0.0:8000", help="vLLM server address"),
+):
+    """Run high-performance MiningEngine code (refactored)."""
+    setup_logging(log_level)
+    logger.info("🚀 Starting Reliquary code Miner")
+
+    import bittensor as bt
+    import torch
+    from reliquary.environment import load_environments
+    from reliquary.infrastructure.chain import get_subtensor
+    from reliquary.miner_code.engine import MiningEngine   # ← your refactored engine
+    from reliquary.shared.modeling import load_text_generation_model, load_tokenizer
+
+    wallet = bt.Wallet(name="dashi", hotkey="miner-3")
+    subtensor = asyncio.run(get_subtensor())
+
+    env_names = [n.strip() for n in environments.split(",") if n.strip()]
+    envs = load_environments(env_names)
+
+    # Load models
+    tokenizer = load_tokenizer(checkpoint)
+    hf_model = load_text_generation_model(
+        checkpoint, torch_dtype=torch.bfloat16, attn_implementation="eager"
+    ).to("cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0").eval()
+
+    engine = MiningEngine(
+        vllm_url=vllm_base_url,
+        hf_model=hf_model,
+        tokenizer=tokenizer,
+        wallet=wallet,
+        env=envs['opencodeinstruct'] if envs else None,   # adjust if you have a mix
+        proof_gpu=1 if torch.cuda.device_count() >= 2 else 0,
+        validator_url_override=validator_url or None,
+    )
+
+    asyncio.run(engine.mine_window(subtensor))
+
+
 if __name__ == "__main__":
     app()

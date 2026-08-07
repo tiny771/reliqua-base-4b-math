@@ -209,14 +209,14 @@ class VLLMGenerator:
             logger.error(f"Failed to process vLLM reload response: {type(e).__name__}: {e}")
             return None
 
-    def _reload_weight(self):
+    def _reload_weight(self, weight_path : str = "/root/reliquary-miner/model"):
         """Backward-compatible sync wrapper for reloading model weights."""
         try:
             response = self._sync_client.post(
                 self.reload_url,
                 json={
                     "method": "reload_weights",
-                    "kwargs": {"weights_path": f"/root/reliquary-miner/model"},
+                    "kwargs": {"weights_path": weight_path},
                 },
             )
             response.raise_for_status()
