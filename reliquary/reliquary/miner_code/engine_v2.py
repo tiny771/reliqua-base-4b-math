@@ -298,7 +298,7 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (0, 20)
-        self._n_candidates = 50
+        self._n_candidates = 100
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()

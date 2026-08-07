@@ -56,7 +56,7 @@ module.exports = {
       interpreter: '/root/reliquary-miner/.venv/bin/python',
 
       // Pass the original arguments
-      args: 'mine-code --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 200 --environments opencodeinstruct --vllm-base-url http://38.102.125.144:8001',
+      args: 'mine-code --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 800 --environments opencodeinstruct --vllm-base-url http://38.102.125.144:15000',
 
       // Working directory (adjust if needed)
       cwd: '/root/reliquary-miner',
