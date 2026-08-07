@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 
 MODEL = "ReliquaryForge/qwen3.5-4b-reliquary-v4"
-SERVER = "http://127.0.0.1:8000"
+SERVER = "http://0.0.0.0:8000"
 CHECK_INTERVAL = 10
 
 MODEL_SNAPSHOT_ALLOW_PATTERNS = [
@@ -58,13 +58,14 @@ class WeightWatcher:
         logging.info("Downloaded snapshot:")
         logging.info(path)
 
+
         return path
 
     def reload_vllm(self, weight_path: str):
         payload = {
             "method": "reload_weights",
             "kwargs": {
-                "weight_path": weight_path,
+                "weights_path": weight_path,
             },
         }
 
@@ -99,9 +100,9 @@ class WeightWatcher:
                     logging.info("Old SHA: %s", self.current_sha)
                     logging.info("New SHA: %s", latest)
 
-                    # path = await self.download_snapshot(latest)
+                    path = await self.download_snapshot(latest)
 
-                    # self.reload_vllm(path)
+                    self.reload_vllm(path)
 
                     self.current_sha = latest
 
