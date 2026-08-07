@@ -352,7 +352,7 @@ class MiningEngine:
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
         self._difficulty_range = (0, 20)
-        self._n_candidates = 15
+        self._n_candidates = 100
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -403,7 +403,12 @@ class MiningEngine:
         async with httpx.AsyncClient(timeout=240) as client:
             while True:
                 state = await self._sync_state(client, url)
-                if not state or state.state != WindowState.OPEN or not state.randomness or TEST_MODE:
+                if (
+                    not state
+                    or state.state != WindowState.OPEN
+                    or not state.randomness
+                    or TEST_MODE
+                ):
                     await self._vllm_client.cancel_all_requests()
                     await asyncio.sleep(0.5)
                     self._selected = {}
@@ -1123,7 +1128,7 @@ class MiningEngine:
                 del old
             await asyncio.to_thread(torch.cuda.empty_cache)
 
-            self._vllm_client._reload_weight(local_path)
+            self._vllm_client._reload_weight()
 
             self._loaded_checkpoint_path = local_path
             logger.info("✅ Checkpoint loaded successfully")

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
+import pandas as pd
 
 from reliquary.constants import (
     BFT_FORCE_TEMPLATE,
@@ -99,125 +100,74 @@ async def _hf_download(repo_id: str, revision: str) -> str:
     return path
 
 
-# Score cache to avoid repeated difficulty evaluation across prompt selection rounds.
-_prompt_difficulty_cache: Dict[int, float] = {}
-_prompt_state_cache: Dict[int, bool] = {}
+def load_diff_metrics(path: str = "classifications/metrics.csv") -> pd.DataFrame:
+    df = pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+        logger.info(f"{len(df)} rows are loaded from {path}")
+    except Exception as e:
+        logger.error(f"Failed load from {path}: {e}")
+
+    return df
 
 
 def select_prompts(
-    env,
+    difficults: pd.DataFrame,
+    env: object,
     cooldown: set,
     selected: set,
-    prompt_range: tuple,
-    count: int = 8,
-    difficulty_range: tuple[float, float] | None = None,
-):
-    lo, hi = prompt_range
-    eligible_random = [i for i in range(lo, hi) if i not in cooldown]
-    eligible = [j for j in eligible_random if j not in selected]
-    if not eligible:
-        return [], []
+    count: int,
+    difficulty_range: tuple[float, float],
+    prompt_range: tuple[int, int],
+) -> tuple[list, list, list]:  # (prompt_indices, problem_objects, difficulties)
+    import random
 
-    count = min(count, len(eligible))
-    sample_size = min(len(eligible), max(count * 3, 120))
-    candidate_indices = (
-        _random.sample(eligible, sample_size)
-        if len(eligible) > sample_size
-        else eligible[:]
+    if count <= 0:
+        return [], [], []
+
+    if len(difficults) <= count:
+        prompt_list = random.sample(range(prompt_range[0], prompt_range[1]), count)
+        problems = [env.get_problem(idx) for idx in prompt_list]
+        diffs = [0] * len(prompt_list)
+        return prompt_list, problems, diffs
+
+    exclude = set(cooldown) | set(selected)
+
+    low, high = difficulty_range
+    mask = (
+        (difficults["difficulty"] >= low)
+        & (difficults["difficulty"] <= high)
+        & (~difficults["prompt_index"].isin(exclude))
     )
 
-    candidate_problems = {idx: env.get_problem(idx) for idx in candidate_indices}
+    candidates = difficults.loc[mask, "prompt_index"]
+    diffs = difficults.loc[mask, "difficulty"]  # aligned with candidates
 
-    to_score = [idx for idx in candidate_indices if idx not in _prompt_difficulty_cache]
-    if to_score:
-        with ThreadPoolExecutor(max_workers=min(16, len(to_score))) as executor:
-            futures = {
-                executor.submit(_eval_difficulty, candidate_problems[idx]): idx
-                for idx in to_score
-            }
-            for future in futures:
-                idx = futures[future]
-                try:
-                    state, diff = future.result()
-                    _prompt_difficulty_cache[idx] = diff
-                    _prompt_state_cache[idx] = state
-                except Exception as exc:
-                    logger.warning(f"Failed to score prompt {idx}: {exc}")
-                    _prompt_difficulty_cache[idx] = 0.0
-                    _prompt_state_cache[idx] = False
+    # Fallback: not enough eligible candidates → sample from all prompts
+    if len(candidates) == 0:
+        logger.warning("Fallback into all eligible prompts.")
+        sampled = difficults["prompt_index"].sample(n=count, random_state=None)
+        sampled_indices = sampled.index
+        prompt_list = sampled.tolist()
+        diff_list = difficults.loc[sampled_indices, "difficulty"].tolist()
+        problems = [env.get_problem(p) for p in prompt_list]
+        return prompt_list, problems, diff_list
 
-    if difficulty_range is not None:
-        lo_diff, hi_diff = difficulty_range
-        filtered = [
-            idx
-            for idx in candidate_indices
-            if lo_diff <= _prompt_difficulty_cache.get(idx, 0.0) < hi_diff
-            and _prompt_state_cache.get(idx, False) == False
-        ]
+    # If fewer candidates than requested, return all available
+    if len(candidates) <= count:
+        prompt_list = candidates.tolist()
+        diff_list = diffs.tolist()  # same order as candidates
+        problems = [env.get_problem(p) for p in prompt_list]
+        return prompt_list, problems, diff_list
 
-        if len(filtered) < count:
-            remaining = [idx for idx in eligible if idx not in candidate_indices]
-            while len(filtered) < count and remaining:
-                add_batch = _random.sample(
-                    remaining, min(len(remaining), max(count, 16))
-                )
-                candidate_indices.extend(add_batch)
-                candidate_indices = list(dict.fromkeys(candidate_indices))
-                candidate_problems.update(
-                    {idx: env.get_problem(idx) for idx in add_batch}
-                )
-                to_score = [
-                    idx for idx in add_batch if idx not in _prompt_difficulty_cache
-                ]
-                if to_score:
-                    with ThreadPoolExecutor(
-                        max_workers=min(16, len(to_score))
-                    ) as executor:
-                        futures = {
-                            executor.submit(
-                                _eval_difficulty, candidate_problems[idx]
-                            ): idx
-                            for idx in to_score
-                        }
-                        for future in futures:
-                            idx = futures[future]
-                            try:
-                                state, diff = future.result()
-                                _prompt_difficulty_cache[idx] = diff
-                                _prompt_state_cache[idx] = state
-                            except Exception as exc:
-                                logger.warning(f"Failed to score prompt {idx}: {exc}")
-                                _prompt_difficulty_cache[idx] = 0.0
-                                _prompt_state_cache[idx] = False
-                filtered = [
-                    idx
-                    for idx in candidate_indices
-                    if lo_diff <= _prompt_difficulty_cache.get(idx, 0.0) < hi_diff
-                    and _prompt_state_cache.get(idx, False) == False
-                ]
-                remaining = [idx for idx in eligible if idx not in candidate_indices]
+    # Randomly sample without replacement
+    sampled = candidates.sample(n=count, random_state=None)
+    sampled_indices = sampled.index  # original DataFrame indices
+    prompt_list = sampled.tolist()
+    diff_list = diffs.loc[sampled_indices].tolist()  # align by index
+    problems = [env.get_problem(p) for p in prompt_list]
 
-        selected_indices = filtered[:count]
-    else:
-        selected_indices = candidate_indices[:count]
-
-    if not selected_indices:
-        logger.warning(
-            f"No prompts found in difficulty range {difficulty_range} for range {lo}-{hi}."
-        )
-        return [], []
-
-    problems = []
-    for idx in selected_indices:
-        problem = dict(candidate_problems[idx])
-        problem["difficulty"] = _prompt_difficulty_cache.get(idx, 0.0)
-        problems.append(problem)
-
-    logger.info(
-        f"🎲 Selected {len(selected_indices)} prompts from range {lo}-{hi} "
-        f"difficulty_range={difficulty_range}"
-    )
-    return selected_indices, problems
+    return prompt_list, problems, diff_list
 
 
 def _compute_merkle_root(rollouts):
@@ -297,12 +247,13 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (0, 20)
+        self._difficulty_range = (3, 4)
         self._n_candidates = 100
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
         self._prompt_range = (0, len(env) if env else 0)
+        self._difficulty_metrics: pd.DataFrame = load_diff_metrics()
 
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._checkpoint_lock = asyncio.Lock()
@@ -321,7 +272,7 @@ class MiningEngine:
         self._analysis_log_path = self._results_dir / "miner_analysis.jsonl"
         self._submission_log_path = self._results_dir / "submission_results.jsonl"
         self._results_dir.mkdir(parents=True, exist_ok=True)
-        self._vllm_client = VLLMGenerator(base_url=vllm_url, model_name="./models/glm")
+        self._vllm_client = VLLMGenerator(base_url=vllm_url, model_name="reliquary")
         logger.info(
             f"🚀 Miner ready | concurrency={max_concurrent} | results_dir={self._results_dir}"
         )
@@ -353,16 +304,14 @@ class MiningEngine:
             active_tasks = {}
             last_state = WindowState.OPEN
             state = None
+            window_diffs = pd.DataFrame()
 
             while True:
                 last_state = state.state if state is not None else WindowState.READY
                 state = await self._sync_state(client, url)
                 if (
-                    not state
-                    or state.state != WindowState.OPEN
-                    or not state.randomness
-                    or TEST_MODE
-                ):
+                    not state or state.state != WindowState.OPEN or not state.randomness
+                ) and not TEST_MODE:
                     if last_state == WindowState.OPEN:
                         for t in active_tasks:
                             t.cancel()
@@ -375,21 +324,34 @@ class MiningEngine:
                     continue
 
                 if last_state != WindowState.OPEN:
-                    logger.info(f"🧭 Window {state.window_n} Started")
+
+                    window_diffs = self._difficulty_metrics[
+                        (
+                            self._difficulty_metrics["prompt_index"]
+                            >= self._prompt_range[0]
+                        )
+                        & (
+                            self._difficulty_metrics["prompt_index"]
+                            < self._prompt_range[1]
+                        )
+                    ]
+                    logger.info(
+                        f"🧭 Window {state.window_n} Started | prompt_range: {self._prompt_range} | prompts count: {len(window_diffs)}"
+                    )
 
                 needed = self._n_candidates - len(active_tasks)
-                if needed > 0:
-                    prompt_idxs, problems = select_prompts(
+                if needed > self._n_candidates - 1:
+                    prompt_idxs, problems, diffs = select_prompts(
+                        window_diffs,
                         self.env,
                         self._cooldown,
                         self._selected,
-                        self._prompt_range,
                         count=needed,
                         difficulty_range=self._difficulty_range,
+                        prompt_range=self._prompt_range,
                     )
 
-                    for idx, prob in zip(prompt_idxs, problems):
-                        diff = prob.get("difficulty", _eval_difficulty(prob)[0])
+                    for idx, prob, diff in zip(prompt_idxs, problems, diffs):
                         self._selected.add(idx)
 
                         task = asyncio.create_task(
@@ -458,6 +420,7 @@ class MiningEngine:
                     reward,
                 ) = item
 
+                rollout_idx = gen_result.rollout_idx
                 # Run heavy GRAIL proof building in a separate thread to not block the event loop
                 submission = await asyncio.to_thread(
                     self._build_rollout_submission,
@@ -477,14 +440,20 @@ class MiningEngine:
                         "url": url,
                     }
 
-                pending_batches[prompt_idx]["submissions"].append(submission)
+                pending_batches[prompt_idx]["submissions"].append(
+                    (rollout_idx, submission)
+                )
 
                 # Once we have all rollouts for this prompt, submit the batch
                 if len(pending_batches[prompt_idx]["submissions"]) == M_ROLLOUTS:
                     batch_info = pending_batches.pop(prompt_idx)
+
+                    batch_info["submissions"].sort(key=lambda x: x[0])
+                    submissions = [sub for _, sub in batch_info["submissions"]]
+
                     asyncio.create_task(
                         self._submit(
-                            batch_info["submissions"],
+                            submissions,
                             prompt_idx,
                             batch_info["randomness"],
                             batch_info["window_n"],
@@ -558,6 +527,7 @@ class MiningEngine:
 
             passed_rollouts = []
             aborted = False
+            k = 0
 
             # Process rollouts as they complete (FIRST_COMPLETED)
             while pending:
@@ -587,6 +557,14 @@ class MiningEngine:
                         reward = self.env.compute_reward(problem, result.text)
                     except Exception:
                         reward = 0.0
+
+                    # K based early stop
+                    k = k + (reward > 0.5)
+                    if k > 6:
+                        aborted = True
+                        for p in pending:
+                            p.cancel()
+                        break
 
                     passed_rollouts.append((result, reward))
 
@@ -707,7 +685,7 @@ class MiningEngine:
         randomness: str,
         checkpoint_hash: str,
         ground_truth: str,
-        max_tokens: int = 2048,
+        max_tokens: int = 6000,
     ) -> Optional["GenerationResult"]:
         try:
             extra_body = _build_vllm_extra_body(

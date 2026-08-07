@@ -72,7 +72,7 @@ class VLLMGenerator:
         self._sync_client = httpx.Client(
             timeout=self.timeout,
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500),
+            limits=httpx.Limits(max_connections=2000, max_keepalive_connections=1000),
         )
 
         self._async_client = httpx.AsyncClient(
@@ -83,7 +83,7 @@ class VLLMGenerator:
                 pool=30.0,
             ),
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500),
+            limits=httpx.Limits(max_connections=2000, max_keepalive_connections=1000),
         )
 
         self.completions_url = f"{self.base_url}/v1/completions"
@@ -181,9 +181,9 @@ class VLLMGenerator:
             return None
 
         result = self._parse_response_greedy(data, include_prompt_logprobs=True)
-        print("*"*40)
+        print("*" * 40)
         print(result)
-        print("*"*40)
+        print("*" * 40)
         return result if result else None
 
     async def _reload_weight_async(self):
@@ -206,10 +206,12 @@ class VLLMGenerator:
             logger.error(f"vLLM reload request failed: {type(e).__name__}: {e}")
             return None
         except Exception as e:
-            logger.error(f"Failed to process vLLM reload response: {type(e).__name__}: {e}")
+            logger.error(
+                f"Failed to process vLLM reload response: {type(e).__name__}: {e}"
+            )
             return None
 
-    def _reload_weight(self, weight_path : str = "/root/reliquary-miner/model"):
+    def _reload_weight(self, weight_path: str = "/root/reliquary-miner/model"):
         """Backward-compatible sync wrapper for reloading model weights."""
         try:
             response = self._sync_client.post(
@@ -229,7 +231,9 @@ class VLLMGenerator:
             logger.error(f"vLLM reload request failed: {type(e).__name__}: {e}")
             return None
         except Exception as e:
-            logger.error(f"Failed to process vLLM reload response: {type(e).__name__}: {e}")
+            logger.error(
+                f"Failed to process vLLM reload response: {type(e).__name__}: {e}"
+            )
             return None
 
     def _post_request(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -316,7 +320,9 @@ class VLLMGenerator:
                     write=30.0,
                     pool=30.0,
                 ),
-                limits=httpx.Limits(max_connections=1000, max_keepalive_connections=500),
+                limits=httpx.Limits(
+                    max_connections=2000, max_keepalive_connections=1000
+                ),
             )
 
     def close(self) -> None:
@@ -360,9 +366,9 @@ class VLLMGenerator:
             "max_tokens": max_tokens,
             "top_k": 20,
             "top_p": 0.95,
-            "presence_penalty":0.0,
-            "frequency_penalty":0.0,
-            "repetition_penalty":1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "repetition_penalty": 1.0,
             "stream": False,
             "logprobs": logprobs,
             "return_token_ids": True,
@@ -395,7 +401,9 @@ class VLLMGenerator:
             "logprobs": 1,
         }
         if extra_body:
-            payload["vllm_xargs"] = extra_body #VllmXargs.model_validate(extra_body).model_dump()
+            payload["vllm_xargs"] = (
+                extra_body  # VllmXargs.model_validate(extra_body).model_dump()
+            )
 
         data = self._post_request(payload)
         if not data or not data.get("choices"):
@@ -410,8 +418,6 @@ def _eval_difficulty(problem):
     text = problem.get("problem", "")
     solution = problem.get("solution", "")
     answer = str(problem.get("ground_truth", ""))
-
-    
 
     answer_score = 0.0
     answer_state = False
