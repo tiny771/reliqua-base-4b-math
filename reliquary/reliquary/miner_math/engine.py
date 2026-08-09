@@ -68,7 +68,7 @@ FORCED_EOS_INJECT = False
 EARLY_STOP_GENERATION = True
 ENABLE_BFT_GENERATION = True
 ENABLE_PREFLIGHT_GENERATION = False
-FIRST_STAGE_MAX_TOKENS = 2000
+FIRST_STAGE_MAX_TOKENS = 15000
 
 # ==========================================================
 
@@ -468,8 +468,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (3.5, 5.5)
-        self._n_candidates = 40
+        self._difficulty_range = (6.5, 7.5)
+        self._n_candidates = 12
 
         self._process_start = True
         self._bft_n_candidates = 0
@@ -1084,23 +1084,23 @@ class MiningEngine:
         #     )
         #     return False
 
-        # completion_tokens = getattr(result, "tokens", None) or []
-        # prompt_token_ids = getattr(result, "prompt_token_ids", None)
-        # if prompt_token_ids is not None:
-        #     total_token_count = len(prompt_token_ids) + len(completion_tokens)
-        # else:
-        #     total_token_count = (prompt_len or 0) + len(completion_tokens)
+        completion_tokens = getattr(result, "tokens", None) or []
+        prompt_token_ids = getattr(result, "prompt_token_ids", None)
+        if prompt_token_ids is not None:
+            total_token_count = len(prompt_token_ids) + len(completion_tokens)
+        else:
+            total_token_count = (prompt_len or 0) + len(completion_tokens)
 
-        # if total_token_count <= FIRST_STAGE_MAX_TOKENS:
-        #     logger.warning(
-        #         f"⚠️ #{prompt_idx} → stage-one rollout rejected on token count "
-        #         f"| rollout={getattr(result, 'rollout_idx', 0)} "
-        #         f"| tokens={total_token_count} "
-        #         f"| completion_tokens={len(completion_tokens)} "
-        #         f"| prompt_tokens={len(prompt_token_ids) if prompt_token_ids is not None else (prompt_len or 0)} "
-        #         f"| threshold={FIRST_STAGE_MAX_TOKENS}"
-        #     )
-        #     return False
+        if total_token_count <= FIRST_STAGE_MAX_TOKENS:
+            logger.warning(
+                f"⚠️ #{prompt_idx} → stage-one rollout rejected on token count "
+                f"| rollout={getattr(result, 'rollout_idx', 0)} "
+                f"| tokens={total_token_count} "
+                f"| completion_tokens={len(completion_tokens)} "
+                f"| prompt_tokens={len(prompt_token_ids) if prompt_token_ids is not None else (prompt_len or 0)} "
+                f"| threshold={FIRST_STAGE_MAX_TOKENS}"
+            )
+            return False
 
         # token_logprobs = getattr(result, "token_logprobs", None) or [0.0]
 
@@ -1135,7 +1135,7 @@ class MiningEngine:
         #         )
         #         return False
 
-        print(f"Finally this rollout {prompt_idx} passed in first stage")
+        # print(f"Finally this rollout {prompt_idx} passed in first stage")
         return True
 
     def _passes_stage_two_gate(self, result, prompt_idx: int) -> bool:
@@ -1226,11 +1226,11 @@ class MiningEngine:
                         )
                         return []
 
-                    if not self._passes_stage_two_gate(result, prompt_idx):
+                    if not self._passes_stage_one_gate(result, prompt_idx, prompt_len, ground_truth):
                         await _abort_batch()
                         duration = time.time() - start
                         logger.warning(
-                            f"⚠️ #{prompt_idx}f → later rollout rejected at stage-two gate "
+                            f"⚠️ #{prompt_idx}f → later rollout rejected at stage-one gate "
                             f"| rollout={getattr(result, 'rollout_idx', 0)} "
                             f"| generated={len(results)}/{M_ROLLOUTS} "
                             f"| {duration:.2f}s"
@@ -1334,9 +1334,6 @@ class MiningEngine:
         forced = gen.forced
         forced_span = gen.forced_span
         all_tokens = prompt_ids + comp_ids
-        print("*" * 40, flush=True)
-        print(f"ALL Text: {self.tokenizer.decode(all_tokens)}", flush=True)
-        print("*" * 40, flush=True)
 
         commit = self._build_grail_commit(
             all_tokens, len(prompt_ids), randomness, forced, forced_span
