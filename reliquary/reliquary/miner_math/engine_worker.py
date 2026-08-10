@@ -789,6 +789,10 @@ class MiningEngine:
 
             await self.grail_queue.put(job)
 
+            logger.info(
+                f"⏭️  #{prompt_idx} → queued for GRAIL submission."
+            )
+
             submit_result = await future
             
             await self._record_analysis_result(

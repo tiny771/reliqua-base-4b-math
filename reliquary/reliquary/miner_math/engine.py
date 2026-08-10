@@ -24,6 +24,9 @@ from typing import TYPE_CHECKING, List, Tuple, Set, Dict, Optional
 import random as _random
 import torch
 
+from dataclasses import dataclass
+from typing import Any
+
 import traceback
 
 import numpy as np
@@ -131,6 +134,21 @@ class MinerStats:
 
 stats = MinerStats()
 
+@dataclass
+class GrailJob:
+    prompt_idx: int
+    problem: str
+    randomness: str
+
+    gen_results: list
+    rewards: list
+
+    window_n: int
+    state: object
+    client: object
+    url: str
+
+    future: asyncio.Future
 
 # ====================== Helpers ======================
 async def maybe_pull_checkpoint(
@@ -377,38 +395,6 @@ def _current_drand_round_at_send() -> int:
     return compute_current_drand_round(time.time(), ci["genesis_time"], ci["period"])
 
 
-# def _pregenerate_u_list(
-#     randomness: str,
-#     prompt_idx: int,
-#     checkpoint_hash: str,
-#     max_new_tokens: int,
-# ) -> List[List[float]]:
-
-#     from reliquary.environment.forced_sampling import u_at
-
-#     start = time.time()
-#     seed_u = []
-#     for rollout_idx in range(M_ROLLOUTS):
-#         u_list = []
-#         for t in range(max_new_tokens):
-#             u = u_at(
-#                 randomness=randomness,
-#                 prompt_idx=prompt_idx,
-#                 checkpoint_hash=checkpoint_hash,
-#                 rollout_index=rollout_idx,
-#                 t=t,
-#             )
-#             u_list.append(u)
-#         seed_u.append(u_list)
-
-#     duration = time.time() - start
-#     stats.record_u_list_generation(duration)
-#     logger.debug(
-#         f"⏱️ Pre-generated u_list[{M_ROLLOUTS}][{max_new_tokens}] in {duration:.3f}s"
-#     )
-#     return seed_u
-
-
 def _bft_generation_offset(
     *,
     prompt_len: int,
@@ -468,8 +454,9 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (6.5, 7.5)
-        self._n_candidates = 12
+        # self._difficulty_range = (6.8, 7.3)
+        self._difficulty_range = (6.8, 7,3)
+        self._n_candidates = 15
 
         self._process_start = True
         self._bft_n_candidates = 0
@@ -483,6 +470,11 @@ class MiningEngine:
 
         self._local_checkpoint_n = 0
         self._local_checkpoint_hash = ""
+
+
+        self.grail_queue = asyncio.Queue()
+
+        self.grail_worker_task = None
 
         from reliquary.shared.hf_compat import resolve_hidden_size
         from reliquary.protocol.grail_verifier import GRAILVerifier
@@ -501,6 +493,448 @@ class MiningEngine:
             f"🚀 Optimized Miner ready (u_list pre-gen) | concurrency={max_concurrent} | results_dir={self._results_dir}"
         )
 
+    async def start_workers(self):
+        if self.grail_worker_task is None:
+            self.grail_woker_task = asyncio.create_task(
+                self._grail_worker()
+            )
+
+            logger.info("🚀 Grail worker started")
+
+    def _build_grail_commits_batched(
+        self,
+        rollouts_data: List[Dict],
+        randomness: str,
+    ) -> List[Dict]:
+        """
+        Build GRAIL commits using mini-batches.
+
+        Splits large rollout batches to reduce GPU peak memory.
+        """
+
+        if not rollouts_data:
+            return []
+
+
+        # Adjust this depending on VRAM.
+        # For RTX PRO 6000 96GB:
+        # 2 = safest
+        # 4 = faster
+        MINI_BATCH_SIZE = 2
+
+
+        all_commits = []
+
+        total = len(rollouts_data)
+
+
+        for start_idx in range(
+            0,
+            total,
+            MINI_BATCH_SIZE,
+        ):
+
+            end_idx = min(
+                start_idx + MINI_BATCH_SIZE,
+                total,
+            )
+
+
+            mini_batch = rollouts_data[
+                start_idx:end_idx
+            ]
+
+
+            logger.info(
+                f"🔹 GRAIL mini batch "
+                f"{start_idx}:{end_idx}/{total}"
+            )
+
+
+            commits = self._build_grail_commit_batch_single(
+                mini_batch,
+                randomness,
+            )
+
+
+            all_commits.extend(commits)
+
+
+            # release allocator blocks
+            torch.cuda.empty_cache()
+
+
+        return all_commits
+
+    def _build_grail_commit_batch_single(
+        self,
+        rollouts_data: List[Dict],
+        randomness: str,
+    ) -> List[Dict]:
+
+        if not rollouts_data:
+            return []
+
+
+        start = time.time()
+
+
+        all_token_seqs = [
+            rd["all_tokens"]
+            for rd in rollouts_data
+        ]
+
+
+        max_len = max(
+            len(x)
+            for x in all_token_seqs
+        )
+
+
+        batch_size = len(all_token_seqs)
+
+
+        device = f"cuda:{self.proof_gpu}"
+
+
+        pad_token_id = (
+            getattr(
+                self.tokenizer,
+                "pad_token_id",
+                0,
+            )
+            or 0
+        )
+
+
+        padded_tokens = []
+        attention_masks = []
+
+
+        for tokens in all_token_seqs:
+
+            pad_len = max_len - len(tokens)
+
+
+            padded_tokens.append(
+                tokens + [pad_token_id] * pad_len
+            )
+
+
+            attention_masks.append(
+                [1] * len(tokens)
+                +
+                [0] * pad_len
+            )
+
+
+        proof_input = torch.tensor(
+            padded_tokens,
+            device=device,
+            dtype=torch.long,
+        )
+
+
+        attention_mask = torch.tensor(
+            attention_masks,
+            device=device,
+            dtype=torch.long,
+        )
+
+
+        from reliquary.shared.forward import forward_single_layer
+        from reliquary.constants import GRAIL_PROOF_VERSION
+        from reliquary.protocol.signatures import sign_commit_binding
+
+
+        try:
+
+            with torch.inference_mode():
+
+                hidden, token_logprobs_batch = (
+                    forward_single_layer(
+                        self.hf_model,
+                        proof_input,
+                        attention_mask,
+                        LAYER_INDEX,
+                        return_token_logprobs=True,
+                    )
+                )
+
+        except Exception as e:
+
+            logger.exception(
+                f"GRAIL mini batch failed: {e}"
+            )
+
+            del proof_input
+            del attention_mask
+
+            torch.cuda.empty_cache()
+
+            return [
+                None
+                for _ in rollouts_data
+            ]
+
+
+        r_vec = self._verifier.generate_r_vec(
+            randomness
+        )
+
+
+        model_name = getattr(
+            self.hf_model,
+            "name_or_path",
+            "unknown",
+        )
+
+        commits = []
+
+        for idx, rd in enumerate(rollouts_data):
+
+            all_tokens = rd["all_tokens"]
+
+            prompt_length = rd["prompt_length"]
+
+            forced = rd["forced"]
+
+            forced_span = rd["forced_span"]
+
+
+            seq_len = len(all_tokens)
+
+
+            #
+            # Hidden state commitment
+            #
+
+            hidden_states = (
+                hidden[
+                    idx,
+                    :seq_len
+                ]
+                .clone()
+            )
+
+
+            commitments = (
+                self._verifier
+                .create_commitments_batch(
+                    hidden_states,
+                    r_vec,
+                )
+            )
+
+
+            #
+            # Token log probabilities
+            #
+
+            seq_token_lp = (
+                token_logprobs_batch[
+                    idx,
+                    :seq_len
+                ]
+            )
+
+
+            token_logprobs = [
+                seq_token_lp[i].item()
+                for i in range(
+                    prompt_length,
+                    seq_len,
+                )
+            ]
+
+
+            signature = sign_commit_binding(
+                all_tokens,
+                randomness,
+                model_name,
+                LAYER_INDEX,
+                commitments,
+                self.wallet,
+            )
+
+
+            commit = {
+
+                "tokens": all_tokens,
+
+                "commitments": commitments,
+
+                "proof_version":
+                    GRAIL_PROOF_VERSION,
+
+
+                "model": {
+                    "name": model_name,
+                    "layer_index": LAYER_INDEX,
+                },
+
+
+                "signature":
+                    signature.hex(),
+
+
+                "beacon": {
+                    "randomness": randomness,
+                },
+
+
+                "rollout": {
+
+                    "prompt_length":
+                        prompt_length,
+
+                    "completion_length":
+                        len(all_tokens)-prompt_length,
+
+                    "success":
+                        True,
+
+                    "total_reward":
+                        0.0,
+
+                    "advantage":
+                        0.0,
+
+                    "token_logprobs":
+                        token_logprobs,
+
+                    "forced":
+                        forced,
+
+                    "force_span":
+                        forced_span,
+                },
+            }
+
+
+            commits.append(commit)
+
+
+            del hidden_states
+
+
+        #
+        # Free GPU memory
+        #
+
+        del proof_input
+        del attention_mask
+        del hidden
+        del token_logprobs_batch
+
+
+        torch.cuda.empty_cache()
+
+
+        duration = time.time() - start
+
+
+        stats.proof_times.append(
+            duration
+        )
+
+
+        logger.info(
+            f"⚡ GRAIL mini batch "
+            f"{batch_size} rollouts "
+            f"{duration:.3f}s"
+        )
+
+
+        return commits
+
+    def _build_all_grail_submissions(self, job):
+                 # Prepare batched data for all rollouts
+        rollouts_data = []
+        for gen_result in job.gen_results:
+            prompt_ids = gen_result.prompt_token_ids
+            comp_ids = gen_result.tokens
+            all_tokens = prompt_ids + comp_ids
+            rollouts_data.append({
+                "all_tokens": all_tokens,
+                "prompt_length": len(prompt_ids),
+                "forced": gen_result.forced,
+                "forced_span": gen_result.forced_span,
+            })
+        
+        # Batch generate all commits in a single forward pass
+        commits = self._build_grail_commits_batched(rollouts_data, job.randomness)
+        
+        # Build submissions from batched commits
+        submissions = []
+        for gen_result, reward, commit in zip(job.gen_results, job.rewards, commits):
+            if commit is None:
+                logger.warning(f"⚠️ Skipping rollout for #{prompt_idx} due to failed commit generation")
+                continue
+            
+            prompt_ids = gen_result.prompt_token_ids
+            comp_ids = gen_result.tokens
+            all_tokens = prompt_ids + comp_ids
+            
+            submissions.append(RolloutSubmission(
+                tokens=all_tokens,
+                reward=reward,
+                commit=commit,
+                env_name=self.env.name
+            ))
+
+        return submissions
+            
+
+        # return [
+        #     self._build_rollout_submission(
+        #         g,
+        #         job.problem,
+        #         job.randomness,
+        #         rew,
+        #     )
+        #     for g, rew in zip(
+        #         job.gen_results,
+        #         job.rewards,
+        #     )
+        # ]
+
+    async def _grail_worker(self):
+
+        while True:
+
+            job = await self.grail_queue.get()
+
+            try:
+                # logger.info(
+                #     f"prompt={job.prompt_idx} submission construction is started!"
+                # )
+
+                submissions = await asyncio.to_thread(
+                    self._build_all_grail_submissions,
+                    job,
+                )
+
+                result = await self._submit(
+                    submissions=submissions,
+                    prompt_idx=job.prompt_idx,
+                    randomness=job.randomness,
+                    window_n=job.window_n,
+                    state=job.state,
+                    client=job.client,
+                    url=job.url,
+                    rewards=job.rewards,
+                )
+
+                job.future.set_result(result)
+
+            except Exception as e:
+                job.future.set_exception(e)
+
+            finally:
+                self.grail_queue.task_done()
+
+    
     async def mine_window(self, subtensor):
         import httpx
         from reliquary.miner.submitter import (
@@ -510,6 +944,8 @@ class MiningEngine:
             submit_batch_v2,
         )
         from reliquary.protocol.submission import WindowState
+
+        await self.start_workers()
 
         subtensor = await chain.get_subtensor()
 
@@ -720,38 +1156,29 @@ class MiningEngine:
                 f"💎  #{prompt_idx} → PASSED | sigma={sigma:.3f} | rewards={rewards} | diff={diff:.2f} | perp={perplexity:.2f}"
             )
 
-            submissions = [
-                self._build_rollout_submission(g, problem, randomness, rew)
-                for g, rew in zip(gen_results, rewards)
-            ]
-            submit_result = await self._submit(
-                submissions, prompt_idx, randomness, window_n, state, client, url, rewards,
+            future = asyncio.get_running_loop().create_future()
+
+            job = GrailJob(
+                prompt_idx=prompt_idx,
+                problem=problem,
+                randomness=randomness,
+                gen_results=gen_results,
+                rewards=rewards,
+                window_n=window_n,
+                state=state,
+                client=client,
+                url=url,
+                future=future,
             )
-            await self._record_analysis_result(
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "prompt_idx": prompt_idx,
-                    "window_n": window_n,
-                    "status": "submitted" if submit_result else "submit_failed",
-                    "reason": "submitted" if submit_result else "submit_failed",
-                    "diff": diff,
-                    "perplexity": perplexity,
-                    "sigma": sigma,
-                    "rewards": rewards,
-                    "prompt_len": prompt_len,
-                    "rollout_count": len(gen_results),
-                    "prompt_preview": problem.get("prompt", "")[:160],
-                    "solution": problem.get("solution", ""),
-                    "solution_len": len(problem.get("solution", "")),
-                    **analysis_metrics,
-                    "completion_rollout_previews": [
-                        getattr(r, "text", "") for r in gen_results or []
-                    ],
-                    "completion_rollout_lengths": [
-                        len(getattr(r, "tokens", []) or []) for r in gen_results or []
-                    ],
-                }
+
+            await self.grail_queue.put(job)
+            logger.info(
+                f"⏭️  #{prompt_idx} → queued for GRAIL submission."
             )
+
+            submit_result = await future
+
+          
             stats.prompts_processed += 1
 
     def _collect_rollout_analysis_metrics(
@@ -816,16 +1243,6 @@ class MiningEngine:
         )
         if _bad:
             return True, True
-
-        # Check that the EOS token has sufficient probability
-        # Validator requires final_lp >= log(MIN_EOS_PROBABILITY)
-        # Use slightly more aggressive threshold to catch edge cases early
-        # min_eos_logprob = math.log(MIN_EOS_PROBABILITY)
-        # if token_logprobs and token_logprobs[-1] < min_eos_logprob:
-        #     logger.warning(
-        #         f"EOS token logprob too low: {token_logprobs[-1]:.3f} < {min_eos_logprob:.3f}"
-        #     )
-        #     return True
 
         return False, False
 
@@ -1446,6 +1863,8 @@ class MiningEngine:
                 randomness=state.randomness or "",
                 drand_round_fn=_current_drand_round_at_send,
             )
+            
+
             logger.info(
                 f"📤 Submitted window={state.window_n} prompt={prompt_idx} "
                 f"accepted={resp.accepted} reason={getattr(resp.reason, 'value', resp.reason)} "
@@ -1515,7 +1934,7 @@ class MiningEngine:
                 del old
             await asyncio.to_thread(torch.cuda.empty_cache)
 
-            self._vllm_client._reload_weight(local_path)
+            # self._vllm_client._reload_weight(local_path)
 
             self._loaded_checkpoint_path = local_path
             logger.info("✅ Checkpoint loaded successfully")

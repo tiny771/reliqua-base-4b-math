@@ -501,134 +501,354 @@ class MiningEngine:
             logger.info("🚀 Grail worker started")
 
     def _build_grail_commits_batched(
-        self, 
+        self,
         rollouts_data: List[Dict],
-        randomness: str
+        randomness: str,
     ) -> List[Dict]:
         """
-        Build GRAIL commits for multiple rollouts in a single batched forward pass.
-        
-        Args:
-            rollouts_data: List of dicts, each containing:
-                - all_tokens: List[int]
-                - prompt_length: int
-                - forced: bool
-                - forced_span: Optional[Tuple[int, int]]
-            randomness: str
-        
-        Returns:
-            List of commit dictionaries (same structure as _build_grail_commit)
+        Build GRAIL commits using mini-batches.
+
+        Splits large rollout batches to reduce GPU peak memory.
         """
+
         if not rollouts_data:
             return []
-        
+
+
+        # Adjust this depending on VRAM.
+        # For RTX PRO 6000 96GB:
+        # 2 = safest
+        # 4 = faster
+        MINI_BATCH_SIZE = 2
+
+
+        all_commits = []
+
+        total = len(rollouts_data)
+
+
+        for start_idx in range(
+            0,
+            total,
+            MINI_BATCH_SIZE,
+        ):
+
+            end_idx = min(
+                start_idx + MINI_BATCH_SIZE,
+                total,
+            )
+
+
+            mini_batch = rollouts_data[
+                start_idx:end_idx
+            ]
+
+
+            logger.info(
+                f"🔹 GRAIL mini batch "
+                f"{start_idx}:{end_idx}/{total}"
+            )
+
+
+            commits = self._build_grail_commit_batch_single(
+                mini_batch,
+                randomness,
+            )
+
+
+            all_commits.extend(commits)
+
+
+            # release allocator blocks
+            torch.cuda.empty_cache()
+
+
+        return all_commits
+
+    def _build_grail_commit_batch_single(
+        self,
+        rollouts_data: List[Dict],
+        randomness: str,
+    ) -> List[Dict]:
+
+        if not rollouts_data:
+            return []
+
+
         start = time.time()
-        
-        # Prepare batched input
-        all_token_seqs = [rd["all_tokens"] for rd in rollouts_data]
-        max_len = max(len(tokens) for tokens in all_token_seqs)
+
+
+        all_token_seqs = [
+            rd["all_tokens"]
+            for rd in rollouts_data
+        ]
+
+
+        max_len = max(
+            len(x)
+            for x in all_token_seqs
+        )
+
+
         batch_size = len(all_token_seqs)
-        
-        # Pad sequences and create attention mask
-        # Using pad_token_id from tokenizer, or 0 if not available
-        pad_token_id = getattr(self.tokenizer, "pad_token_id", 0) or 0
-        
+
+
+        device = f"cuda:{self.proof_gpu}"
+
+
+        pad_token_id = (
+            getattr(
+                self.tokenizer,
+                "pad_token_id",
+                0,
+            )
+            or 0
+        )
+
+
         padded_tokens = []
         attention_masks = []
-        
+
+
         for tokens in all_token_seqs:
-            padding_length = max_len - len(tokens)
-            # Pad on the right
-            padded = tokens + [pad_token_id] * padding_length
-            mask = [1] * len(tokens) + [0] * padding_length
-            padded_tokens.append(padded)
-            attention_masks.append(mask)
-        
-        # Convert to tensors
-        proof_input = torch.tensor(padded_tokens, device=f"cuda:{self.proof_gpu}")
-        attention_mask = torch.tensor(attention_masks, device=f"cuda:{self.proof_gpu}")
-        
+
+            pad_len = max_len - len(tokens)
+
+
+            padded_tokens.append(
+                tokens + [pad_token_id] * pad_len
+            )
+
+
+            attention_masks.append(
+                [1] * len(tokens)
+                +
+                [0] * pad_len
+            )
+
+
+        proof_input = torch.tensor(
+            padded_tokens,
+            device=device,
+            dtype=torch.long,
+        )
+
+
+        attention_mask = torch.tensor(
+            attention_masks,
+            device=device,
+            dtype=torch.long,
+        )
+
+
         from reliquary.shared.forward import forward_single_layer
         from reliquary.constants import GRAIL_PROOF_VERSION
         from reliquary.protocol.signatures import sign_commit_binding
-        
+
+
         try:
-            with torch.no_grad():
-                hidden, logits = forward_single_layer(
-                    self.hf_model, proof_input, attention_mask, LAYER_INDEX
+
+            with torch.inference_mode():
+
+                hidden, token_logprobs_batch = (
+                    forward_single_layer(
+                        self.hf_model,
+                        proof_input,
+                        attention_mask,
+                        LAYER_INDEX,
+                        return_token_logprobs=True,
+                    )
                 )
+
+
         except Exception as e:
-            logger.error(f"Batched proof generation failed: {e}")
-            # Clean up GPU memory on failure
-            del proof_input, attention_mask
-            torch.cuda.empty_cache()
-            return [None] * batch_size
-        
-        # Generate r_vec once (same for all rollouts since they share randomness)
-        r_vec = self._verifier.generate_r_vec(randomness)
-        model_name = getattr(self.hf_model, "name_or_path", "unknown")
-        
-        # Process each rollout in the batch
-        commits = []
-        for idx, rd in enumerate(rollouts_data):
-            all_tokens = rd["all_tokens"]
-            prompt_length = rd["prompt_length"]
-            forced = rd["forced"]
-            forced_span = rd["forced_span"]
-            
-            # Extract hidden states for this sequence (only up to actual length, not padding)
-            seq_len = len(all_tokens)
-            hidden_states = hidden[idx, :seq_len].clone()  # Clone to avoid holding reference
-            
-            # Create commitments
-            commitments = self._verifier.create_commitments_batch(hidden_states, r_vec)
-            
-            # Extract logits and compute token logprobs
-            seq_logits = logits[idx, :seq_len]
-            log_probs = torch.log_softmax(seq_logits.float(), dim=-1)
-            token_logprobs = [
-                log_probs[i - 1, all_tokens[i]].item()
-                for i in range(prompt_length, len(all_tokens))
-            ]
-            
-            # Clean up intermediate tensors
-            del hidden_states, seq_logits, log_probs
-            
-            # Sign commit
-            signature = sign_commit_binding(
-                all_tokens, randomness, model_name, LAYER_INDEX, commitments, self.wallet
+
+            logger.exception(
+                f"GRAIL mini batch failed: {e}"
             )
-            
+
+
+            del proof_input
+            del attention_mask
+
+            torch.cuda.empty_cache()
+
+            return [
+                None
+                for _ in rollouts_data
+            ]
+
+
+        r_vec = self._verifier.generate_r_vec(
+            randomness
+        )
+
+
+        model_name = getattr(
+            self.hf_model,
+            "name_or_path",
+            "unknown",
+        )
+
+
+        commits = []
+
+
+        for idx, rd in enumerate(rollouts_data):
+
+            all_tokens = rd["all_tokens"]
+
+            prompt_length = rd["prompt_length"]
+
+            forced = rd["forced"]
+
+            forced_span = rd["forced_span"]
+
+
+            seq_len = len(all_tokens)
+
+
+            #
+            # Hidden state commitment
+            #
+
+            hidden_states = (
+                hidden[
+                    idx,
+                    :seq_len
+                ]
+                .clone()
+            )
+
+
+            commitments = (
+                self._verifier
+                .create_commitments_batch(
+                    hidden_states,
+                    r_vec,
+                )
+            )
+
+
+            #
+            # Token log probabilities
+            #
+
+            seq_token_lp = (
+                token_logprobs_batch[
+                    idx,
+                    :seq_len
+                ]
+            )
+
+
+            token_logprobs = [
+                seq_token_lp[i].item()
+                for i in range(
+                    prompt_length,
+                    seq_len,
+                )
+            ]
+
+
+            signature = sign_commit_binding(
+                all_tokens,
+                randomness,
+                model_name,
+                LAYER_INDEX,
+                commitments,
+                self.wallet,
+            )
+
+
             commit = {
+
                 "tokens": all_tokens,
+
                 "commitments": commitments,
-                "proof_version": GRAIL_PROOF_VERSION,
-                "model": {"name": model_name, "layer_index": LAYER_INDEX},
-                "signature": signature.hex(),
-                "beacon": {"randomness": randomness},
+
+                "proof_version":
+                    GRAIL_PROOF_VERSION,
+
+
+                "model": {
+                    "name": model_name,
+                    "layer_index": LAYER_INDEX,
+                },
+
+
+                "signature":
+                    signature.hex(),
+
+
+                "beacon": {
+                    "randomness": randomness,
+                },
+
+
                 "rollout": {
-                    "prompt_length": prompt_length,
-                    "completion_length": len(all_tokens) - prompt_length,
-                    "success": True,
-                    "total_reward": 0.0,
-                    "advantage": 0.0,
-                    "token_logprobs": token_logprobs,
-                    "forced": forced,
-                    "force_span": forced_span,
+
+                    "prompt_length":
+                        prompt_length,
+
+                    "completion_length":
+                        len(all_tokens)-prompt_length,
+
+                    "success":
+                        True,
+
+                    "total_reward":
+                        0.0,
+
+                    "advantage":
+                        0.0,
+
+                    "token_logprobs":
+                        token_logprobs,
+
+                    "forced":
+                        forced,
+
+                    "force_span":
+                        forced_span,
                 },
             }
+
+
             commits.append(commit)
-        
-        # Clean up large batched tensors
-        del proof_input, attention_mask, hidden, logits
+
+
+            del hidden_states
+
+
+        #
+        # Free GPU memory
+        #
+
+        del proof_input
+        del attention_mask
+        del hidden
+        del token_logprobs_batch
+
+
         torch.cuda.empty_cache()
-        
+
+
         duration = time.time() - start
-        # Record the batch as a single proof time
-        stats.proof_times.append(duration)
-        
-        logger.info(f"⚡ Batched proof generation for {batch_size} rollouts in {duration:.3f}s")
-        
+
+
+        stats.proof_times.append(
+            duration
+        )
+
+
+        logger.info(
+            f"⚡ GRAIL mini batch "
+            f"{batch_size} rollouts "
+            f"{duration:.3f}s"
+        )
+
+
         return commits
 
     def _build_all_grail_submissions(self, job):
@@ -955,6 +1175,9 @@ class MiningEngine:
             )
 
             await self.grail_queue.put(job)
+            logger.info(
+                f"⏭️  #{prompt_idx} → queued for GRAIL submission."
+            )
 
             submit_result = await future
 
