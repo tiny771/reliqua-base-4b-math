@@ -376,39 +376,6 @@ def _current_drand_round_at_send() -> int:
     ci = get_current_chain()
     return compute_current_drand_round(time.time(), ci["genesis_time"], ci["period"])
 
-
-# def _pregenerate_u_list(
-#     randomness: str,
-#     prompt_idx: int,
-#     checkpoint_hash: str,
-#     max_new_tokens: int,
-# ) -> List[List[float]]:
-
-#     from reliquary.environment.forced_sampling import u_at
-
-#     start = time.time()
-#     seed_u = []
-#     for rollout_idx in range(M_ROLLOUTS):
-#         u_list = []
-#         for t in range(max_new_tokens):
-#             u = u_at(
-#                 randomness=randomness,
-#                 prompt_idx=prompt_idx,
-#                 checkpoint_hash=checkpoint_hash,
-#                 rollout_index=rollout_idx,
-#                 t=t,
-#             )
-#             u_list.append(u)
-#         seed_u.append(u_list)
-
-#     duration = time.time() - start
-#     stats.record_u_list_generation(duration)
-#     logger.debug(
-#         f"⏱️ Pre-generated u_list[{M_ROLLOUTS}][{max_new_tokens}] in {duration:.3f}s"
-#     )
-#     return seed_u
-
-
 def _bft_generation_offset(
     *,
     prompt_len: int,
@@ -720,10 +687,40 @@ class MiningEngine:
                 f"💎  #{prompt_idx} → PASSED | sigma={sigma:.3f} | rewards={rewards} | diff={diff:.2f} | perp={perplexity:.2f}"
             )
 
-            submissions = [
-                self._build_rollout_submission(g, problem, randomness, rew)
-                for g, rew in zip(gen_results, rewards)
-            ]
+            # Prepare batched data for all rollouts
+            rollouts_data = []
+            for gen_result in gen_results:
+                prompt_ids = gen_result.prompt_token_ids
+                comp_ids = gen_result.tokens
+                all_tokens = prompt_ids + comp_ids
+                rollouts_data.append({
+                    "all_tokens": all_tokens,
+                    "prompt_length": len(prompt_ids),
+                    "forced": gen_result.forced,
+                    "forced_span": gen_result.forced_span,
+                })
+            
+            # Batch generate all commits in a single forward pass
+            commits = self._build_grail_commits_batched(rollouts_data, randomness)
+            
+            # Build submissions from batched commits
+            submissions = []
+            for gen_result, reward, commit in zip(gen_results, rewards, commits):
+                if commit is None:
+                    logger.warning(f"⚠️ Skipping rollout for #{prompt_idx} due to failed commit generation")
+                    continue
+                
+                prompt_ids = gen_result.prompt_token_ids
+                comp_ids = gen_result.tokens
+                all_tokens = prompt_ids + comp_ids
+                
+                submissions.append(RolloutSubmission(
+                    tokens=all_tokens,
+                    reward=reward,
+                    commit=commit,
+                    env_name=self.env.name
+                ))
+            
             submit_result = await self._submit(
                 submissions, prompt_idx, randomness, window_n, state, client, url, rewards,
             )
@@ -1273,7 +1270,6 @@ class MiningEngine:
             logger.exception(f"⚠️ Gen fail #{prompt_idx}: {e}")
             return []
 
-
     async def _record_analysis_result(self, record: Dict):
         self._results_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._append_analysis_record, record)
@@ -1397,6 +1393,137 @@ class MiningEngine:
                 "force_span": forced_span,
             },
         }
+
+    def _build_grail_commits_batched(
+        self, 
+        rollouts_data: List[Dict],
+        randomness: str
+    ) -> List[Dict]:
+        """
+        Build GRAIL commits for multiple rollouts in a single batched forward pass.
+        
+        Args:
+            rollouts_data: List of dicts, each containing:
+                - all_tokens: List[int]
+                - prompt_length: int
+                - forced: bool
+                - forced_span: Optional[Tuple[int, int]]
+            randomness: str
+        
+        Returns:
+            List of commit dictionaries (same structure as _build_grail_commit)
+        """
+        if not rollouts_data:
+            return []
+        
+        start = time.time()
+        
+        # Prepare batched input
+        all_token_seqs = [rd["all_tokens"] for rd in rollouts_data]
+        max_len = max(len(tokens) for tokens in all_token_seqs)
+        batch_size = len(all_token_seqs)
+        
+        # Pad sequences and create attention mask
+        # Using pad_token_id from tokenizer, or 0 if not available
+        pad_token_id = getattr(self.tokenizer, "pad_token_id", 0) or 0
+        
+        padded_tokens = []
+        attention_masks = []
+        
+        for tokens in all_token_seqs:
+            padding_length = max_len - len(tokens)
+            # Pad on the right
+            padded = tokens + [pad_token_id] * padding_length
+            mask = [1] * len(tokens) + [0] * padding_length
+            padded_tokens.append(padded)
+            attention_masks.append(mask)
+        
+        # Convert to tensors
+        proof_input = torch.tensor(padded_tokens, device=f"cuda:{self.proof_gpu}")
+        attention_mask = torch.tensor(attention_masks, device=f"cuda:{self.proof_gpu}")
+        
+        from reliquary.shared.forward import forward_single_layer
+        from reliquary.constants import GRAIL_PROOF_VERSION
+        from reliquary.protocol.signatures import sign_commit_binding
+        
+        try:
+            with torch.no_grad():
+                hidden, logits = forward_single_layer(
+                    self.hf_model, proof_input, attention_mask, LAYER_INDEX
+                )
+        except Exception as e:
+            logger.error(f"Batched proof generation failed: {e}")
+            # Clean up GPU memory on failure
+            del proof_input, attention_mask
+            torch.cuda.empty_cache()
+            return [None] * batch_size
+        
+        # Generate r_vec once (same for all rollouts since they share randomness)
+        r_vec = self._verifier.generate_r_vec(randomness)
+        model_name = getattr(self.hf_model, "name_or_path", "unknown")
+        
+        # Process each rollout in the batch
+        commits = []
+        for idx, rd in enumerate(rollouts_data):
+            all_tokens = rd["all_tokens"]
+            prompt_length = rd["prompt_length"]
+            forced = rd["forced"]
+            forced_span = rd["forced_span"]
+            
+            # Extract hidden states for this sequence (only up to actual length, not padding)
+            seq_len = len(all_tokens)
+            hidden_states = hidden[idx, :seq_len].clone()  # Clone to avoid holding reference
+            
+            # Create commitments
+            commitments = self._verifier.create_commitments_batch(hidden_states, r_vec)
+            
+            # Extract logits and compute token logprobs
+            seq_logits = logits[idx, :seq_len]
+            log_probs = torch.log_softmax(seq_logits.float(), dim=-1)
+            token_logprobs = [
+                log_probs[i - 1, all_tokens[i]].item()
+                for i in range(prompt_length, len(all_tokens))
+            ]
+            
+            # Clean up intermediate tensors
+            del hidden_states, seq_logits, log_probs
+            
+            # Sign commit
+            signature = sign_commit_binding(
+                all_tokens, randomness, model_name, LAYER_INDEX, commitments, self.wallet
+            )
+            
+            commit = {
+                "tokens": all_tokens,
+                "commitments": commitments,
+                "proof_version": GRAIL_PROOF_VERSION,
+                "model": {"name": model_name, "layer_index": LAYER_INDEX},
+                "signature": signature.hex(),
+                "beacon": {"randomness": randomness},
+                "rollout": {
+                    "prompt_length": prompt_length,
+                    "completion_length": len(all_tokens) - prompt_length,
+                    "success": True,
+                    "total_reward": 0.0,
+                    "advantage": 0.0,
+                    "token_logprobs": token_logprobs,
+                    "forced": forced,
+                    "force_span": forced_span,
+                },
+            }
+            commits.append(commit)
+        
+        # Clean up large batched tensors
+        del proof_input, attention_mask, hidden, logits
+        torch.cuda.empty_cache()
+        
+        duration = time.time() - start
+        # Record the batch as a single proof time
+        stats.proof_times.append(duration)
+        
+        logger.info(f"⚡ Batched proof generation for {batch_size} rollouts in {duration:.3f}s")
+        
+        return commits
 
     async def _submit(
         self,
