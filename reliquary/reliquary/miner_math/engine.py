@@ -454,12 +454,12 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        # self._difficulty_range = (6.8, 7.3)
-        self._difficulty_range = (6.8, 7,3)
-        self._n_candidates = 15
+        self._difficulty_range = (6.8, 7.3)
+        self._n_candidates = 16
 
         self._process_start = True
         self._bft_n_candidates = 0
+
 
         self._cooldown: Set[int] = set()
         self._selected: Set[int] = set()
@@ -1177,6 +1177,32 @@ class MiningEngine:
             )
 
             submit_result = await future
+
+            await self._record_analysis_result(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "prompt_idx": prompt_idx,
+                    "window_n": window_n,
+                    "status": "submitted" if submit_result else "submit_failed",
+                    "reason": "submitted" if submit_result else "submit_failed",
+                    "diff": diff,
+                    "perplexity": perplexity,
+                    "sigma": sigma,
+                    "rewards": rewards,
+                    "prompt_len": prompt_len,
+                    "rollout_count": len(gen_results),
+                    "prompt_preview": problem.get("prompt", "")[:160],
+                    "solution": problem.get("solution", ""),
+                    "solution_len": len(problem.get("solution", "")),
+                    **analysis_metrics,
+                    "completion_rollout_previews": [
+                        getattr(r, "text", "") for r in gen_results or []
+                    ],
+                    "completion_rollout_lengths": [
+                        len(getattr(r, "tokens", []) or []) for r in gen_results or []
+                    ],
+                }
+            )
 
           
             stats.prompts_processed += 1
