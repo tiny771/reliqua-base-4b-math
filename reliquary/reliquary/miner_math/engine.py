@@ -24,6 +24,9 @@ from typing import TYPE_CHECKING, List, Tuple, Set, Dict, Optional
 import random as _random
 import torch
 
+from dataclasses import dataclass
+from typing import Any
+
 import traceback
 
 import numpy as np
@@ -131,6 +134,21 @@ class MinerStats:
 
 stats = MinerStats()
 
+@dataclass
+class GrailJob:
+    prompt_idx: int
+    problem: str
+    randomness: str
+
+    gen_results: list
+    rewards: list
+
+    window_n: int
+    state: object
+    client: object
+    url: str
+
+    future: asyncio.Future
 
 # ====================== Helpers ======================
 async def maybe_pull_checkpoint(
@@ -468,8 +486,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (6.5, 7.5)
-        self._n_candidates = 12
+        self._difficulty_range = (7.5, 8.5)
+        self._n_candidates = 20
 
         self._process_start = True
         self._bft_n_candidates = 0
@@ -483,6 +501,11 @@ class MiningEngine:
 
         self._local_checkpoint_n = 0
         self._local_checkpoint_hash = ""
+
+
+        self.grail_queue = asyncio.Queue()
+
+        self.grail_worker_task = None
 
         from reliquary.shared.hf_compat import resolve_hidden_size
         from reliquary.protocol.grail_verifier import GRAILVerifier
@@ -501,6 +524,65 @@ class MiningEngine:
             f"🚀 Optimized Miner ready (u_list pre-gen) | concurrency={max_concurrent} | results_dir={self._results_dir}"
         )
 
+    async def start_workers(self):
+        if self.grail_worker_task is None:
+            self.grail_woker_task = asyncio.create_task(
+                self._grail_worker()
+            )
+
+            logger.info("🚀 Grail worker started")
+
+    def _build_all_grail_submissions(self, job):
+
+        return [
+            self._build_rollout_submission(
+                g,
+                job.problem,
+                job.randomness,
+                rew,
+            )
+            for g, rew in zip(
+                job.gen_results,
+                job.rewards,
+            )
+        ]
+
+    async def _grail_worker(self):
+
+        while True:
+
+            job = await self.grail_queue.get()
+
+            try:
+                logger.info(
+                    f"prompt={job.prompt_idx} submission construction is started!"
+                )
+
+                submissions = await asyncio.to_thread(
+                    self._build_all_grail_submissions,
+                    job,
+                )
+
+                result = await self._submit(
+                    submissions=submissions,
+                    prompt_idx=job.prompt_idx,
+                    randomness=job.randomness,
+                    window_n=job.window_n,
+                    state=job.state,
+                    client=job.client,
+                    url=job.url,
+                    rewards=job.rewards,
+                )
+
+                job.future.set_result(result)
+
+            except Exception as e:
+                job.future.set_exception(e)
+
+            finally:
+                self.grail_queue.task_done()
+
+    
     async def mine_window(self, subtensor):
         import httpx
         from reliquary.miner.submitter import (
@@ -510,6 +592,8 @@ class MiningEngine:
             submit_batch_v2,
         )
         from reliquary.protocol.submission import WindowState
+
+        await self.start_workers()
 
         subtensor = await chain.get_subtensor()
 
@@ -720,38 +804,104 @@ class MiningEngine:
                 f"💎  #{prompt_idx} → PASSED | sigma={sigma:.3f} | rewards={rewards} | diff={diff:.2f} | perp={perplexity:.2f}"
             )
 
-            submissions = [
-                self._build_rollout_submission(g, problem, randomness, rew)
-                for g, rew in zip(gen_results, rewards)
-            ]
-            submit_result = await self._submit(
-                submissions, prompt_idx, randomness, window_n, state, client, url, rewards,
+            # print(f"prompt idx: {prompt_idx}, Submission construction start time: {datetime.now(timezone.utc).isoformat()}", flush=True)
+
+            # # submissions = [
+            # #     self._build_rollout_submission(g, problem, randomness, rew)
+            # #     for g, rew in zip(gen_results, rewards)
+            # # ]
+
+            # submissions = await asyncio.gather(
+            #     *[
+            #         asyncio.to_thread(
+            #             self._build_rollout_submission,
+            #             g,
+            #             problem,
+            #             randomness,
+            #             rew,
+            #         )
+            #         for g, rew in zip(gen_results, rewards)
+            #     ]
+            # )
+
+            # print(f"prompt idx: {prompt_idx}, Submission construction end time: {datetime.now(timezone.utc).isoformat()}", flush=True)
+
+            # submit_result = await self._submit(
+            #     submissions, prompt_idx, randomness, window_n, state, client, url, rewards,
+            # )
+
+            # print(f"prompt idx: {prompt_idx}, Submission end time: {datetime.now(timezone.utc).isoformat()}", flush=True)
+
+            # submit_tasks = []
+
+            # for g, rew in zip(gen_results, rewards):
+            #     future = asyncio.get_running_loop().create_future()
+
+            #     job = GrailJob(
+            #         prompt_idx=prompt_idx,
+            #         problem=problem,
+            #         randomness=randomness,
+            #         gen_results=gen_results,
+            #         rewards=rewards,
+            #         window_n=window_n,
+            #         state=state,
+            #         client=client,
+            #         url=url,
+            #         future=future,
+            #     )
+
+            #     await self.grail_queue.put(job)
+
+            #     submit_tasks.append(future)
+
+            # results = await asyncio.gather(
+            #     *submit_tasks
+            # )
+
+            future = asyncio.get_running_loop().create_future()
+
+            job = GrailJob(
+                prompt_idx=prompt_idx,
+                problem=problem,
+                randomness=randomness,
+                gen_results=gen_results,
+                rewards=rewards,
+                window_n=window_n,
+                state=state,
+                client=client,
+                url=url,
+                future=future,
             )
-            await self._record_analysis_result(
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "prompt_idx": prompt_idx,
-                    "window_n": window_n,
-                    "status": "submitted" if submit_result else "submit_failed",
-                    "reason": "submitted" if submit_result else "submit_failed",
-                    "diff": diff,
-                    "perplexity": perplexity,
-                    "sigma": sigma,
-                    "rewards": rewards,
-                    "prompt_len": prompt_len,
-                    "rollout_count": len(gen_results),
-                    "prompt_preview": problem.get("prompt", "")[:160],
-                    "solution": problem.get("solution", ""),
-                    "solution_len": len(problem.get("solution", "")),
-                    **analysis_metrics,
-                    "completion_rollout_previews": [
-                        getattr(r, "text", "") for r in gen_results or []
-                    ],
-                    "completion_rollout_lengths": [
-                        len(getattr(r, "tokens", []) or []) for r in gen_results or []
-                    ],
-                }
-            )
+
+            await self.grail_queue.put(job)
+
+            submit_result = await future
+
+            # await self._record_analysis_result(
+            #     {
+            #         "timestamp": datetime.now(timezone.utc).isoformat(),
+            #         "prompt_idx": prompt_idx,
+            #         "window_n": window_n,
+            #         "status": "submitted" if submit_result else "submit_failed",
+            #         "reason": "submitted" if submit_result else "submit_failed",
+            #         "diff": diff,
+            #         "perplexity": perplexity,
+            #         "sigma": sigma,
+            #         "rewards": rewards,
+            #         "prompt_len": prompt_len,
+            #         "rollout_count": len(gen_results),
+            #         "prompt_preview": problem.get("prompt", "")[:160],
+            #         "solution": problem.get("solution", ""),
+            #         "solution_len": len(problem.get("solution", "")),
+            #         **analysis_metrics,
+            #         "completion_rollout_previews": [
+            #             getattr(r, "text", "") for r in gen_results or []
+            #         ],
+            #         "completion_rollout_lengths": [
+            #             len(getattr(r, "tokens", []) or []) for r in gen_results or []
+            #         ],
+            #     }
+            # )
             stats.prompts_processed += 1
 
     def _collect_rollout_analysis_metrics(
@@ -1446,6 +1596,8 @@ class MiningEngine:
                 randomness=state.randomness or "",
                 drand_round_fn=_current_drand_round_at_send,
             )
+            
+
             logger.info(
                 f"📤 Submitted window={state.window_n} prompt={prompt_idx} "
                 f"accepted={resp.accepted} reason={getattr(resp.reason, 'value', resp.reason)} "
@@ -1515,7 +1667,7 @@ class MiningEngine:
                 del old
             await asyncio.to_thread(torch.cuda.empty_cache)
 
-            self._vllm_client._reload_weight(local_path)
+            # self._vllm_client._reload_weight(local_path)
 
             self._loaded_checkpoint_path = local_path
             logger.info("✅ Checkpoint loaded successfully")

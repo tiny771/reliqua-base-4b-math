@@ -16,6 +16,8 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
+from datetime import datetime, timezone
+
 import httpx
 
 from reliquary.constants import VALIDATOR_HTTP_PORT
@@ -341,10 +343,13 @@ async def submit_batch_v2(
     cli = client or httpx.AsyncClient(timeout=timeout)
     await _wait_for_safe_drand_round()
     payload, precommit = _finalize_attempt(1)
+
+
     receipt_id: str | None = None
     last_exc: Exception | None = None
     try:
         for attempt, delay in enumerate(_RETRY_DELAYS, start=1):
+
             if receipt_id is None:
                 try:
                     precommit_response = await cli.post(
@@ -388,6 +393,7 @@ async def submit_batch_v2(
                         f"precommit HTTP {precommit_response.status_code}: "
                         f"{_safe_detail(precommit_response)}"
                     )
+                
                 precommit_verdict = SubmissionPrecommitResponse.model_validate(
                     precommit_response.json()
                 )
@@ -398,7 +404,9 @@ async def submit_batch_v2(
                     ):
                         await asyncio.sleep(delay)
                         await _wait_for_safe_drand_round()
+    
                         payload, precommit = _finalize_attempt(attempt + 1)
+         
                         continue
                     return BatchSubmissionResponse(
                         accepted=False,
@@ -418,6 +426,7 @@ async def submit_batch_v2(
                     },
                     timeout=timeout,
                 )
+               
             except (httpx.RequestError, httpx.TimeoutException) as exc:
                 last_exc = exc
                 if attempt < len(_RETRY_DELAYS):

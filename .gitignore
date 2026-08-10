@@ -4,6 +4,7 @@ env/
 .venv/
 .venv-vllm/
 .venv-vlllm/
+.venv-kernels/
 ENV/
 env.bak/
 venv.bak/

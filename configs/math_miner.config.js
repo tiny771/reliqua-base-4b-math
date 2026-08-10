@@ -27,10 +27,10 @@ module.exports = {
       name: 'reliquary-mine',
 
       // Path to your Python script (the reliquary binary)
-      script: '/root/reliquary-miner/.venv/bin/reliquary',
+      script: '/root/reliquary-miner/.venv-kernels/bin/reliquary',
 
       // Use the Python interpreter from the same virtual environment
-      interpreter: '/root/reliquary-miner/.venv/bin/python',
+      interpreter: '/root/reliquary-miner/.venv-kernels/bin/python',
 
       // Pass the original arguments
       args: 'mine-math --checkpoint ReliquaryForge/qwen3.5-4b-reliquary-v4 --max-concurrent 128',
@@ -54,7 +54,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PYTHONUNBUFFERED: '1',      // ensures logs appear in real-time
-        GRAIL_ATTN_IMPL: 'eager',
+        GRAIL_ATTN_IMPL: 'kernels-community/flash-attn2@v3',
         // Add any other needed env vars, e.g. CUDA_VISIBLE_DEVICES
       },
 
