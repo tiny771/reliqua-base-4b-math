@@ -61,11 +61,11 @@ class VLLMGenerator:
 
     def __init__(
         self,
-        base_url: str = "http://38.102.125.144:8899",
+        base_url: str = "http://38.102.125.144:8777",
         model_name: str = "Qwen3.5-4B",
         timeout: int = 300,
     ):
-        self.base_url = "http://38.102.125.144:8899"
+        self.base_url = "http://38.102.125.144:8777"
         self.model_name = "reliquary"
         self.timeout = httpx.Timeout(timeout, connect=10.0)
 
@@ -430,7 +430,7 @@ def _eval_difficulty(problem):
     if sol_word_count > 0:
         score += math.log1p(sol_word_count / 30.0) * 1.0
 
-    if len(problem.get("solution", "")) < 600:
+    if len(problem.get("solution", "")) < 2000:
         solution_state = True
     # 3. Answer complexity (more nuanced)
     # Count operators
@@ -472,7 +472,7 @@ def _eval_difficulty(problem):
 
     rounded = round(score, 1)
 
-    # state = solution_state
-    state = False
+    state = solution_state
+    # state = False
 
     return state, rounded
