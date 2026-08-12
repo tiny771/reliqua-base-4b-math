@@ -71,7 +71,7 @@ FORCED_EOS_INJECT = False
 EARLY_STOP_GENERATION = True
 ENABLE_BFT_GENERATION = True
 ENABLE_PREFLIGHT_GENERATION = False
-FIRST_STAGE_MAX_TOKENS = 15000
+FIRST_STAGE_MAX_TOKENS = 12000
 
 # ==========================================================
 
@@ -341,7 +341,8 @@ def select_prompts(
                 ]
                 remaining = [idx for idx in eligible if idx not in candidate_indices]
 
-        selected_indices = filtered[:count]
+        selected_indices = _random.sample(filtered, min(count, len(filtered)))
+        print(f"Filtered prompts num: {len(filtered)}", flush=True)
     else:
         selected_indices = candidate_indices[:count]
 
@@ -443,7 +444,7 @@ class MiningEngine:
         proof_gpu=1,
         max_new_tokens=MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override=None,
-        max_concurrent=30,
+        max_concurrent=5,
         difficulty_range: tuple[float, float] | None = None,
     ):
         self.vllm_url = vllm_url
@@ -454,8 +455,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (6.8, 7.8)
-        self._n_candidates = 12
+        self._difficulty_range = (7.5, 8.0)
+        self._n_candidates = 6
 
         self._process_start = True
         self._bft_n_candidates = 0
@@ -520,7 +521,7 @@ class MiningEngine:
         # For RTX PRO 6000 96GB:
         # 2 = safest
         # 4 = faster
-        MINI_BATCH_SIZE = 2
+        MINI_BATCH_SIZE = 1
 
 
         all_commits = []
@@ -1950,7 +1951,15 @@ class MiningEngine:
             )
 
             def prepare_model(model):
-                return model.to(f"cuda:{self.proof_gpu}").eval()
+                model = model.to(f"cuda:{self.proof_gpu}").eval()
+                # Apply torch.compile for inference optimization (~10-20% speedup)
+                try:
+                    import torch
+                    model = torch.compile(model, mode="reduce-overhead")
+                    logger.info("✅ torch.compile applied (reduce-overhead mode)")
+                except Exception as e:
+                    logger.warning(f"⚠️ torch.compile failed (non-critical): {e}")
+                return model
 
             new_hf = await asyncio.to_thread(prepare_model, new_hf)
 

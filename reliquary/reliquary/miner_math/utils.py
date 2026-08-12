@@ -430,7 +430,7 @@ def _eval_difficulty(problem):
     if sol_word_count > 0:
         score += math.log1p(sol_word_count / 30.0) * 1.0
 
-    if len(problem.get("solution", "")) < 2000:
+    if len(problem.get("solution", "")) < 2500:
         solution_state = True
     # 3. Answer complexity (more nuanced)
     # Count operators

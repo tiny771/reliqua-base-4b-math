@@ -71,11 +71,22 @@ def load_text_generation_model(source: str, **kwargs):
 
     `Qwen/Qwen3.5-2B` (and 4B) is packaged as a conditional image-text-to-text
     model, even for text-only use. Legacy Qwen3 checkpoints remain CausalLM.
+    
+    Inference optimizations:
+    - low_cpu_mem_usage=True: Reduces peak memory during loading
+    - device_map="auto": Optimizes device placement across GPUs
     """
     from transformers import AutoConfig
 
     if "torch_dtype" in kwargs and "dtype" not in kwargs:
         kwargs["dtype"] = kwargs.pop("torch_dtype")
+    
+    # Add memory-efficient loading flags if not already specified
+    if "low_cpu_mem_usage" not in kwargs:
+        kwargs["low_cpu_mem_usage"] = True
+    if "device_map" not in kwargs:
+        kwargs["device_map"] = "auto"
+    
     config = AutoConfig.from_pretrained(source, **_config_kwargs(kwargs))
     auto_cls = auto_model_class_for_config(config)
     return auto_cls.from_pretrained(source, **kwargs)

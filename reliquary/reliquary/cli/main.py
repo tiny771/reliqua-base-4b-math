@@ -694,7 +694,10 @@ def mine_math(
     # Load models
     tokenizer = load_tokenizer(checkpoint)
     hf_model = load_text_generation_model(
-        checkpoint, torch_dtype=torch.bfloat16, attn_implementation="kernels-community/flash-attn2@v3"
+        checkpoint, 
+        torch_dtype=torch.bfloat16,
+        # attn_implementation="eager"
+        attn_implementation="kernels-community/flash-attn2@v3"
     ).to("cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0").eval()
 
     engine = MiningEngine(
