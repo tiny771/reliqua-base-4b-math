@@ -71,7 +71,7 @@ FORCED_EOS_INJECT = False
 EARLY_STOP_GENERATION = True
 ENABLE_BFT_GENERATION = True
 ENABLE_PREFLIGHT_GENERATION = False
-FIRST_STAGE_MAX_TOKENS = 12000
+FIRST_STAGE_MAX_TOKENS = 10000
 
 # ==========================================================
 
@@ -257,7 +257,6 @@ def select_prompts(
 
     #     print(f"Saved {len(problems)} cooldown problems to {COOLDOWN_PROBLEM_FILE}")
 
-   
     lo, hi = prompt_range
     eligible_random = [i for i in range(lo, hi) if i not in cooldown]
     eligible = [j for j in eligible_random if j not in selected]
@@ -342,7 +341,6 @@ def select_prompts(
                 remaining = [idx for idx in eligible if idx not in candidate_indices]
 
         selected_indices = _random.sample(filtered, min(count, len(filtered)))
-        print(f"Filtered prompts num: {len(filtered)}", flush=True)
     else:
         selected_indices = candidate_indices[:count]
 
@@ -455,8 +453,8 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
-        self._difficulty_range = (7.5, 8.0)
-        self._n_candidates = 6
+        self._difficulty_range = (7.3, 7.8)
+        self._n_candidates = 7
 
         self._process_start = True
         self._bft_n_candidates = 0
@@ -472,10 +470,14 @@ class MiningEngine:
         self._local_checkpoint_n = 0
         self._local_checkpoint_hash = ""
 
-
+        # Queue for building GRAIL submissions
         self.grail_queue = asyncio.Queue()
+        
+        # Queue for submitting built GRAIL jobs (decoupled from building)
+        self.submission_queue = asyncio.Queue()
 
         self.grail_worker_task = None
+        self.submission_worker_tasks = []
 
         from reliquary.shared.hf_compat import resolve_hidden_size
         from reliquary.protocol.grail_verifier import GRAILVerifier
@@ -499,8 +501,14 @@ class MiningEngine:
             self.grail_woker_task = asyncio.create_task(
                 self._grail_worker()
             )
-
-            logger.info("🚀 Grail worker started")
+            logger.info("🚀 Grail worker started (building)")
+            
+            # Start parallel submission workers (2-4 workers for submissions)
+            num_submission_workers = min(3, max(1, self.grail_queue.maxsize or 2))
+            for i in range(num_submission_workers):
+                task = asyncio.create_task(self._submission_worker(i))
+                self.submission_worker_tasks.append(task)
+            logger.info(f"🚀 {num_submission_workers} submission worker(s) started")
 
     def _build_grail_commits_batched(
         self,
@@ -901,39 +909,86 @@ class MiningEngine:
         # ]
 
     async def _grail_worker(self):
-
+        """Build GRAIL submissions without blocking on submission.
+        
+        Optimization: Decoupled from _submit() to allow parallel building
+        and submitting. This worker builds submissions as fast as possible,
+        then queues them for async submission by _submission_worker.
+        """
         while True:
-
             job = await self.grail_queue.get()
 
             try:
-                # logger.info(
-                #     f"prompt={job.prompt_idx} submission construction is started!"
-                # )
-
+                # Build submissions (CPU-bound, can be slow)
                 submissions = await asyncio.to_thread(
                     self._build_all_grail_submissions,
                     job,
                 )
 
-                result = await self._submit(
-                    submissions=submissions,
-                    prompt_idx=job.prompt_idx,
-                    randomness=job.randomness,
-                    window_n=job.window_n,
-                    state=job.state,
-                    client=job.client,
-                    url=job.url,
-                    rewards=job.rewards,
+                # Queue for submission (non-blocking)
+                # This allows next job to start building immediately
+                submission_job = {
+                    "submissions": submissions,
+                    "prompt_idx": job.prompt_idx,
+                    "randomness": job.randomness,
+                    "window_n": job.window_n,
+                    "state": job.state,
+                    "client": job.client,
+                    "url": job.url,
+                    "rewards": job.rewards,
+                    "future": job.future,
+                }
+                await self.submission_queue.put(submission_job)
+                logger.debug(
+                    f"📤 Queued submission for prompt={job.prompt_idx} | queue_size={self.submission_queue.qsize()}"
                 )
 
-                job.future.set_result(result)
-
             except Exception as e:
+                logger.exception(f"⚠️ Build failed for prompt={job.prompt_idx}: {e}")
                 job.future.set_exception(e)
 
             finally:
                 self.grail_queue.task_done()
+
+    async def _submission_worker(self, worker_id: int):
+        """Worker that submits GRAIL jobs in parallel.
+        
+        This decouples submission from building, allowing:
+        - Fast submission throughput
+        - Non-blocking grail_worker
+        - Parallel submission handling
+        """
+        while True:
+            try:
+                submission_job = await self.submission_queue.get()
+
+                try:
+                    # Submit (I/O-bound, async HTTP call)
+                    result = await self._submit(
+                        submissions=submission_job["submissions"],
+                        prompt_idx=submission_job["prompt_idx"],
+                        randomness=submission_job["randomness"],
+                        window_n=submission_job["window_n"],
+                        state=submission_job["state"],
+                        client=submission_job["client"],
+                        url=submission_job["url"],
+                        rewards=submission_job["rewards"],
+                    )
+
+                    # Set result when complete
+                    submission_job["future"].set_result(result)
+
+                except Exception as e:
+                    logger.exception(
+                        f"⚠️ Submit failed for prompt={submission_job['prompt_idx']}: {e}"
+                    )
+                    submission_job["future"].set_exception(e)
+
+                finally:
+                    self.submission_queue.task_done()
+
+            except Exception as e:
+                logger.exception(f"⚠️ Submission worker {worker_id} error: {e}")
 
     
     async def mine_window(self, subtensor):
@@ -1104,7 +1159,7 @@ class MiningEngine:
                         "diff": diff,
                         "rollout_count": len(gen_results or []),
                         "prompt_len": prompt_len,
-                        "prompt_preview": problem.get("prompt", "")[:160],
+                        "prompt_preview": problem.get("prompt", ""),
                         "solution": problem.get("solution", ""),
                         "solution_len": len(problem.get("solution", "")),
                         **analysis_metrics,
@@ -1138,7 +1193,7 @@ class MiningEngine:
                         "sigma": sigma,
                         "rewards": rewards,
                         "prompt_len": prompt_len,
-                        "prompt_preview": problem.get("prompt", "")[:160],
+                        "prompt_preview": problem.get("prompt", ""),
                         "solution": problem.get("solution", ""),
                         "solution_len": len(problem.get("solution", "")),
                         **analysis_metrics,
@@ -1192,7 +1247,7 @@ class MiningEngine:
                     "rewards": rewards,
                     "prompt_len": prompt_len,
                     "rollout_count": len(gen_results),
-                    "prompt_preview": problem.get("prompt", "")[:160],
+                    "prompt_preview": problem.get("prompt", ""),
                     "solution": problem.get("solution", ""),
                     "solution_len": len(problem.get("solution", "")),
                     **analysis_metrics,
