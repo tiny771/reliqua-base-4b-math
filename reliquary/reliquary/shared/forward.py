@@ -91,7 +91,12 @@ def forward_single_layer(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Forward pass returning hidden states and optionally selected token logprobs.
-
+    
+    Optimizations:
+    - torch.inference_mode() disables gradient tracking
+    - Efficient memory layout for gather operations
+    - Direct indexing instead of pad/cat
+    
     Returns:
         hidden:
             [batch, seq, hidden_dim]
@@ -100,53 +105,97 @@ def forward_single_layer(
             [batch, seq]
             only when return_token_logprobs=True
     """
+    
+    with torch.inference_mode():
+        base_model_prefix = getattr(model, "base_model_prefix", "")
+        base = (
+            getattr(model, base_model_prefix, None)
+            if base_model_prefix
+            else None
+        )
 
-    base_model_prefix = getattr(model, "base_model_prefix", "")
-    base = (
-        getattr(model, base_model_prefix, None)
-        if base_model_prefix
-        else None
-    )
-
-    lm_head = getattr(model, "lm_head", None)
+        lm_head = getattr(model, "lm_head", None)
 
 
-    # Efficient path
-    if layer_index == -1 and base is not None and lm_head is not None:
+        # Efficient path
+        if layer_index == -1 and base is not None and lm_head is not None:
 
-        base_out = base(
+            base_out = base(
+                input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+
+            h = getattr(
+                base_out,
+                "last_hidden_state",
+                None,
+            )
+
+            if h is None:
+                h = base_out[0]
+
+
+            if return_token_logprobs:
+
+                # -------------------------------------------------
+                # Compute logits for shifted positions only
+                # Avoids materializing full [B,S,V] logits matrix
+                # -------------------------------------------------
+
+                # Ensure contiguous for efficient gather
+                shifted_h = h[:, :-1, :].contiguous()
+                shifted_ids = input_ids[:, 1:].contiguous()
+
+                logits = lm_head(shifted_h)
+
+                # Use native dtype if available, avoid unnecessary conversions
+                log_probs = torch.log_softmax(logits, dim=-1)
+
+                token_lp = torch.gather(
+                    log_probs,
+                    dim=-1,
+                    index=shifted_ids.unsqueeze(-1)
+                ).squeeze(-1)
+
+                # Use F.pad instead of creating + concatenating tensors
+                # Much faster and more memory-efficient
+                token_lp = torch.nn.functional.pad(
+                    token_lp, 
+                    (1, 0),  # pad left (seq dimension)
+                    value=0.0
+                )
+
+                return h, token_lp
+
+
+            else:
+
+                logits = lm_head(h)
+
+                return h, logits
+
+
+
+        # fallback path: required for intermediate layers
+
+        outs = model(
             input_ids,
             attention_mask=attention_mask,
+            output_hidden_states=True,
             use_cache=False,
         )
 
-        h = getattr(
-            base_out,
-            "last_hidden_state",
-            None,
-        )
-
-        if h is None:
-            h = base_out[0]
-
+        h = outs.hidden_states[layer_index]
 
         if return_token_logprobs:
 
-            # -------------------------------------------------
-            # Compute logits one token at a time
-            # but never store [B,S,V]
-            # -------------------------------------------------
+            logits = outs.logits
 
-            shifted_h = h[:, :-1, :]
-            shifted_ids = input_ids[:, 1:]
-
-
-            logits = lm_head(
-                shifted_h
-            )
+            shifted_ids = input_ids[:, 1:].contiguous()
 
             log_probs = torch.log_softmax(
-                logits.float(),
+                logits[:, :-1],
                 dim=-1
             )
 
@@ -156,89 +205,13 @@ def forward_single_layer(
                 index=shifted_ids.unsqueeze(-1)
             ).squeeze(-1)
 
-
-            # restore sequence length
-            pad = torch.zeros(
-                (
-                    token_lp.shape[0],
-                    1
-                ),
-                device=token_lp.device,
-                dtype=token_lp.dtype,
+            # Use F.pad for consistency and performance
+            token_lp = torch.nn.functional.pad(
+                token_lp,
+                (1, 0),  # pad left
+                value=0.0
             )
-
-            token_lp = torch.cat(
-                [
-                    pad,
-                    token_lp
-                ],
-                dim=1
-            )
-
-
-            del logits
-            del log_probs
-
 
             return h, token_lp
 
-
-        else:
-
-            logits = lm_head(h)
-
-            return h, logits
-
-
-
-    # fallback path
-
-    outs = model(
-        input_ids,
-        attention_mask=attention_mask,
-        output_hidden_states=True,
-        use_cache=False,
-    )
-
-
-    h = outs.hidden_states[layer_index]
-
-
-    if return_token_logprobs:
-
-        logits = outs.logits
-
-        shifted_ids = input_ids[:, 1:]
-
-        log_probs = torch.log_softmax(
-            logits[:, :-1].float(),
-            dim=-1
-        )
-
-        token_lp = torch.gather(
-            log_probs,
-            -1,
-            shifted_ids.unsqueeze(-1)
-        ).squeeze(-1)
-
-        pad = torch.zeros(
-            (
-                token_lp.shape[0],
-                1
-            ),
-            device=token_lp.device,
-            dtype=token_lp.dtype,
-        )
-
-        token_lp = torch.cat(
-            [
-                pad,
-                token_lp
-            ],
-            dim=1
-        )
-
-        return h, token_lp
-
-
-    return h, outs.logits
+        return h, outs.logits

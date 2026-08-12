@@ -1965,7 +1965,7 @@ class MiningEngine:
 
             old = getattr(self, "hf_model", None)
             self.hf_model = new_hf
-            if old:
+            if old is not None:
                 del old
             await asyncio.to_thread(torch.cuda.empty_cache)
 
