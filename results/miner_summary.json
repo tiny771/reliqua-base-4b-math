@@ -1,8 +1,8 @@
 {
-  "avg_gen_sec": 137.807,
-  "avg_proof_sec": 1.838,
-  "prompts_processed": 48,
-  "rollouts_generated": 41,
-  "submissions_accepted": 10,
-  "timestamp": "2026-08-12T22:47:12.835954+00:00"
+  "avg_gen_sec": 146.415,
+  "avg_proof_sec": 1.923,
+  "prompts_processed": 4,
+  "rollouts_generated": 4,
+  "submissions_accepted": 1,
+  "timestamp": "2026-08-13T15:37:20.665400+00:00"
 }

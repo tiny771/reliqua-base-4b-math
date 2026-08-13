@@ -388,6 +388,95 @@ class VLLMGenerator:
         result = self._parse_response_greedy(data, include_prompt_logprobs=True)
         return result if result else None
 
+def classify_math_subject_rule_based(
+    problem: str,
+    generated_solution: str,
+    expected_answer: str=""
+) -> str:
+    """
+    Classify a math problem into subjects using keyords heuristics.
+    Uses problem, solution and answer for better accuracy.
+    """
+    text = (problem + " " + generated_solution + " " + expected_answer).lower()
+
+    # ---------- Strong Geometry signals ----------
+    geometry_keywords = [
+        r"\btriangle\b", r"\bcircle\b", r"\bangle\b", r"\bperimeter\b", r"\barea\b",
+        r"\bvolume\b", r"\bradius\b", r"\bdiameter\b", r"\bchord\b", r"\btangent\b",
+        r"\bsecant\b", r"\bpolygon\b", r"\bquadrilateral\b", r"\bparallelogram\b",
+        r"\brhombus\b", r"\btrapezoid\b", r"\bhexagon\b", r"\bpentagon\b",
+        r"\bcongruent\b", r"\bsimilar\b", r"\bpythagorean\b", r"\bhypotenuse\b",
+        r"\bcoordinate geometry\b", r"\bdistance formula\b", r"\bmidpoint\b",
+        r"\bcircumscribed\b", r"\binscribed\b", r"\bsector\b", r"\barc\b"
+    ]
+    if any(re.search(k, text) for k in geometry_keywords):
+        return "Geometry"
+
+    # ---------- Number Theory ----------
+    number_theory_keywords = [
+        r"\bprime\b", r"\bdivisible\b", r"\bdivisor\b", r"\bgcd\b", r"\blcm\b",
+        r"\bmodulo\b", r"\bmod\b", r"\bcongruence\b", r"\bfactorial\b",
+        r"\bremainder\b", r"\bodd\b", r"\beven\b", r"\bdigit\b", r"\bbase\b",
+        r"\bperfect square\b", r"\bperfect cube\b", r"\bfibonacci\b",
+        r"\bnumber of positive divisors\b", r"\brelatively prime\b",
+        r"\bcoprime\b", r"\binteger solutions\b"
+    ]
+    if any(re.search(k, text) for k in number_theory_keywords):
+        return "Number Theory"
+
+    # ---------- Counting & Probability ----------
+    counting_keywords = [
+        r"\bprobability\b", r"\bcombination\b", r"\bpermutation\b", r"\bchoose\b",
+        r"\bncr\b", r"\bnpr\b", r"\bfactorial\b", r"\bways\b", r"\barrangement\b",
+        r"\bhow many ways\b", r"\bpigeonhole\b", r"\binclusion-exclusion\b",
+        r"\bsample space\b", r"\bevent\b", r"\bindependent\b", r"\bmutually exclusive\b"
+    ]
+    if any(re.search(k, text) for k in counting_keywords):
+        return "Counting & Probability"
+
+    # ---------- Precalculus / Calculus ----------
+    calc_keywords = [
+        r"\blimit\b", r"\bderivative\b", r"\bintegral\b", r"\bdifferentiate\b",
+        r"\bintegrate\b", r"\bcontinuity\b", r"\basymptote\b", r"\btrigonometric\b",
+        r"\bsin\b", r"\bcos\b", r"\btan\b", r"\bsec\b", r"\bcsc\b", r"\bcot\b",
+        r"\blogarithm\b", r"\bexponential\b", r"\bsequence\b", r"\bseries\b",
+        r"\barithmetic sequence\b", r"\bgeometric sequence\b", r"\bsummation\b"
+    ]
+    if any(re.search(k, text) for k in calc_keywords):
+        return "Precalculus / Calculus"
+
+    # ---------- Intermediate Algebra (more advanced algebra) ----------
+    intermediate_alg_keywords = [
+        r"\bquadratic\b", r"\bpolynomial\b", r"\bfactor\b", r"\broots\b",
+        r"\bcomplex number\b", r"\bi\b", r"\bmatrix\b", r"\bdeterminant\b",
+        r"\bsystem of equations\b", r"\binverse function\b", r"\bcomposition\b",
+        r"\blogarithmic equation\b", r"\bexponential equation\b",
+        r"\brational expression\b", r"\bpartial fraction\b"
+    ]
+    if any(re.search(k, text) for k in intermediate_alg_keywords):
+        return "Intermediate Algebra"
+
+    # ---------- Prealgebra (basic) ----------
+    prealgebra_keywords = [
+        r"\bfraction\b", r"\bdecimal\b", r"\bpercent\b", r"\bratio\b", r"\bproportion\b",
+        r"\baverage\b", r"\bmean\b", r"\bmedian\b", r"\bmode\b", r"\border of operations\b",
+        r"\binteger\b", r"\bwhole number\b", r"\bpositive integer\b"
+    ]
+    # Only classify as Prealgebra if it looks simple and no stronger signal
+    if any(re.search(k, text) for k in prealgebra_keywords) and len(problem) < 300:
+        return "Prealgebra"
+
+    # ---------- Algebra (default for equations, expressions, etc.) ----------
+    algebra_keywords = [
+        r"\bequation\b", r"\bexpression\b", r"\bsolve for\b", r"\bvariable\b",
+        r"\bx\b", r"\by\b", r"\binquality\b", r"\blinear\b", r"\bsimplify\b",
+        r"\bexpand\b", r"\bfactor\b", r"\bfunction\b"
+    ]
+    if any(re.search(k, text) for k in algebra_keywords):
+        return "Algebra"
+
+    # Fallback
+    return "Other / Mixed"
 
 def _eval_difficulty(problem):
     source = problem.get("source", "")
@@ -395,7 +484,16 @@ def _eval_difficulty(problem):
     solution = problem.get("solution", "")
     answer = str(problem.get("ground_truth", ""))
 
-    
+    subject= classify_math_subject_rule_based(
+        problem=text,
+        generated_solution=solution,
+        expected_answer=answer
+    )
+
+    subject_state = True
+
+    if subject in ["Intermediate Algebra"]:
+        subject_state = False
 
     answer_score = 0.0
     answer_state = False
@@ -430,7 +528,7 @@ def _eval_difficulty(problem):
     if sol_word_count > 0:
         score += math.log1p(sol_word_count / 30.0) * 1.0
 
-    if len(problem.get("solution", "")) < 2500:
+    if len(problem.get("solution", "")) < 1500:
         solution_state = True
     # 3. Answer complexity (more nuanced)
     # Count operators
@@ -472,7 +570,8 @@ def _eval_difficulty(problem):
 
     rounded = round(score, 1)
 
-    state = solution_state
+
+    state = solution_state + subject_state
     # state = False
 
     return state, rounded
